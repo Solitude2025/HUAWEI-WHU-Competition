@@ -194,7 +194,7 @@ def main():
     parser.add_argument("--epochs", type=int, default=100, help="训练轮数")
     parser.add_argument("--batch_size", type=int, default=32, help="批次大小")
     parser.add_argument("--lr", type=float, default=0.001, help="学习率")
-    parser.add_argument("--device", type=str, default="cpu", help="设备")
+    parser.add_argument("--device", type=str, default="cuda", help="设备 (cuda/cpu)")
     parser.add_argument("--resume", type=str, default=None, help="恢复训练的检查点")
     parser.add_argument("--save_dir", type=str, default="checkpoints",
                        help="模型保存目录")
@@ -272,7 +272,7 @@ def main():
     start_epoch = 0
     best_f1 = 0.0
     if args.resume and os.path.exists(args.resume):
-        checkpoint = torch.load(args.resume, map_location=device)
+        checkpoint = torch.load(args.resume, map_location=device, weights_only=False)
         model.load_state_dict(checkpoint["model_state_dict"])
         optimizer.load_state_dict(checkpoint["optimizer_state_dict"])
         start_epoch = checkpoint["epoch"] + 1
@@ -286,6 +286,9 @@ def main():
     print(f"\n{'='*60}")
     print(f"开始训练: {epochs} epochs, batch_size={batch_size}")
     print(f"{'='*60}\n")
+    
+    # 训练历史记录（用于可视化曲线）
+    history = []
     
     for epoch in range(start_epoch, epochs):
         epoch_start = time.time()
@@ -319,6 +322,21 @@ def main():
                   f"prec={val_metrics.get('precision', 0):.4f}, "
                   f"rec={val_metrics.get('recall', 0):.4f}")
         
+        # 保存历史
+        history_entry = {
+            "epoch": epoch,
+            "loss": train_metrics["loss"],
+            "accuracy": train_metrics.get("accuracy", 0),
+            "precision": train_metrics.get("precision", 0),
+            "recall": train_metrics.get("recall", 0),
+            "f1_score": train_metrics.get("f1_score", 0),
+            "lr": current_lr,
+        }
+        for k in ["loss", "accuracy", "precision", "recall", "f1_score"]:
+            if k in val_metrics:
+                history_entry[f"val_{k}"] = val_metrics[k]
+        history.append(history_entry)
+        
         # 保存检查点
         val_f1 = val_metrics.get("f1_score", 0.0)
         is_best = val_f1 > best_f1
@@ -332,6 +350,7 @@ def main():
             "scheduler_state_dict": scheduler.state_dict(),
             "train_metrics": train_metrics,
             "val_metrics": val_metrics,
+            "history": history,
             "best_f1": best_f1,
             "config": config,
         }
