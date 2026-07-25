@@ -262,27 +262,48 @@ def download_omnifall(output_dir, detector, max_videos=500):
     
     # ---- 3. 解压 ----
     video_extract_dir = os.path.join(omni_dir, "videos")
-    if not os.path.isdir(video_extract_dir) or len(os.listdir(video_extract_dir)) == 0:
-        print("[3/4] 解压视频存档...")
-        # 先检查 tar 中是否有 videos/ 前缀
+    
+    # 检查用户是否已手动解压到其他目录
+    alt_extract_dir = os.path.join(omni_dir, "omnifall-synthetic_av1")
+    if os.path.isdir(alt_extract_dir):
+        alt_count = 0
+        for root, _, files in os.walk(alt_extract_dir):
+            alt_count += sum(1 for f in files if f.endswith(".mp4"))
+        if alt_count >= max_videos:
+            print(f"[3/4] 检测到用户已手动解压: {alt_extract_dir} ({alt_count} 个视频)")
+            video_extract_dir = alt_extract_dir
+            existing_mp4 = alt_count
+        else:
+            existing_mp4 = 0
+    else:
+        # 检查现有视频数量
+        existing_mp4 = 0
+        if os.path.isdir(video_extract_dir):
+            for root, _, files in os.walk(video_extract_dir):
+                existing_mp4 += sum(1 for f in files if f.endswith(".mp4"))
+    
+    if existing_mp4 < max_videos:
+        if existing_mp4 > 0:
+            print(f"[3/4] 已有 {existing_mp4} 个视频，但需要 {max_videos} 个，重新解压...")
+            import shutil
+            shutil.rmtree(video_extract_dir)
+        else:
+            print("[3/4] 解压视频存档...")
+        
+        os.makedirs(video_extract_dir, exist_ok=True)
         with tarfile.open(tar_path, "r") as tar:
             members = tar.getmembers()
-            # 查看目录结构
-            sample_paths = [m.name for m in members[:5]]
-            print(f"   存档结构: {sample_paths}")
-            
-            # 提取所有 .mp4 文件
             video_members = [m for m in members if m.name.endswith(".mp4")]
-            print(f"   共 {len(video_members)} 个视频")
+            print(f"   存档共 {len(video_members)} 个视频，提取前 {max_videos} 个")
             
             for i, m in enumerate(video_members[:max_videos]):
                 tar.extract(m, path=video_extract_dir)
-                if (i + 1) % 500 == 0:
+                if (i + 1) % 200 == 0:
                     print(f"   已解压 {i+1}/{min(max_videos, len(video_members))}")
         
         print(f"   解压完成 -> {video_extract_dir}")
     else:
-        print(f"[3/4] 视频已解压: {video_extract_dir}")
+        print(f"[3/4] 视频已存在: {existing_mp4} 个")
     
     # ---- 4. 扫描视频并提取关键点 ----
     kp_dir = os.path.join(omni_dir, "keypoints")

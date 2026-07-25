@@ -267,7 +267,7 @@ class RuleRefinementOnline:
         self._feature_buffer.append(motion_features)
         self._angle_buffer.append(motion_features[RuleRefinement.TORSO_ANGLE_IDX])
         self._speed_buffer.append(motion_features[RuleRefinement.CENTER_SPEED_IDX])
-        self._aspect_buffer.append(motion_features[RuleRefinement.ASPECT_CHANGE_IDX])
+        self._aspect_buffer.append(motion_features[RuleRefinement.BBOX_W_CHANGE_IDX])
         
         if len(self._prob_buffer) > self.history_len:
             self._prob_buffer.pop(0)

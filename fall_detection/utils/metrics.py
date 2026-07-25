@@ -59,8 +59,18 @@ def compute_metrics(
     rec = recall_score(label_flat, pred_binary, zero_division=0)
     f1 = f1_score(label_flat, pred_binary, zero_division=0)
     
-    # 混淆矩阵
-    tn, fp, fn, tp = confusion_matrix(label_flat, pred_binary).ravel()
+    # 混淆矩阵（处理单类别情况）
+    cm = confusion_matrix(label_flat, pred_binary)
+    if cm.size == 1:
+        # 只有一种类别
+        if 1 in label_flat:
+            # 全是正样本
+            tn, fp, fn, tp = 0, 0, cm.ravel()[0], 0
+        else:
+            # 全是负样本
+            tn, fp, fn, tp = cm.ravel()[0], 0, 0, 0
+    else:
+        tn, fp, fn, tp = cm.ravel()
     
     # 误报率 (FPR) = FP / (FP + TN)
     fpr = fp / (fp + tn + 1e-8)

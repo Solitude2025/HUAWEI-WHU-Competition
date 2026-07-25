@@ -21,6 +21,7 @@ from typing import Tuple, Optional, Dict
 from .motion_encoder import MotionFeatureEncoder
 from .light_tcn import LightTCN, LightTCN_V2
 from .rule_refinement import RuleRefinement, RuleConfig
+from .transformer_tcn import TransformerTCN, EfficientTransformerTCN, create_transformer_tcn
 
 
 class FallDetector(nn.Module):
@@ -51,13 +52,13 @@ class FallDetector(nn.Module):
         self,
         # Motion Encoder 参数
         motion_feature_dim: int = 48,
-        # Light-TCN 参数
+        # TCN 参数
         tcn_hidden_dim: int = 64,
         tcn_num_layers: int = 5,
         tcn_kernel_size: int = 3,
         tcn_dilations: Optional[list] = None,
         tcn_dropout: float = 0.1,
-        tcn_version: str = "v1",
+        tcn_version: str = "light-tcn-v1",
         # Rule Refinement 参数
         rule_config: Optional[RuleConfig] = None,
         # 通用参数
@@ -71,7 +72,7 @@ class FallDetector(nn.Module):
             tcn_kernel_size: TCN 卷积核大小
             tcn_dilations: 膨胀系数列表
             tcn_dropout: TCN Dropout 比例
-            tcn_version: TCN 版本 ("v1" 或 "v2")
+            tcn_version: TCN 版本 ("light-tcn-v1", "light-tcn-v2", "transformer-tcn-standard", "transformer-tcn-efficient", "transformer-tcn-light")
             rule_config: 规则校正配置
             sequence_length: 时序窗口长度
         """
@@ -84,8 +85,8 @@ class FallDetector(nn.Module):
             feature_dim=motion_feature_dim,
         )
         
-        # Light-TCN
-        if tcn_version == "v2":
+        # 根据版本选择 TCN 模型
+        if tcn_version == "light-tcn-v2":
             self.tcn = LightTCN_V2(
                 input_dim=motion_feature_dim,
                 hidden_dim=tcn_hidden_dim,
@@ -94,7 +95,20 @@ class FallDetector(nn.Module):
                 dilations=tcn_dilations,
                 dropout=tcn_dropout,
             )
-        else:
+        elif tcn_version.startswith("transformer-tcn"):
+            # 使用 Transformer-TCN
+            transformer_version = tcn_version.replace("transformer-tcn-", "")
+            self.tcn = create_transformer_tcn(
+                version=transformer_version,
+                input_dim=motion_feature_dim,
+                embed_dim=tcn_hidden_dim,
+                num_layers=tcn_num_layers,
+                tcn_hidden_dim=tcn_hidden_dim,
+                kernel_size=tcn_kernel_size,
+                dilations=tcn_dilations,
+                dropout=tcn_dropout,
+            )
+        else:  # 默认使用 Light-TCN v1
             self.tcn = LightTCN(
                 input_dim=motion_feature_dim,
                 hidden_dim=tcn_hidden_dim,
@@ -260,7 +274,11 @@ def create_fall_detector(
     创建跌倒检测模型的工厂函数
     
     Args:
-        version: "standard" (标准), "light" (极轻量), "large" (高精度)
+        version: "standard" (标准 Light-TCN), "light" (极轻量 Light-TCN), 
+                 "large" (高精度 Light-TCN), 
+                 "transformer-tcn-standard" (标准 Transformer-TCN),
+                 "transformer-tcn-efficient" (高效 Transformer-TCN),
+                 "transformer-tcn-light" (极轻量 Transformer-TCN)
     
     Returns:
         FallDetector 实例
@@ -271,7 +289,7 @@ def create_fall_detector(
             "tcn_hidden_dim": 64,
             "tcn_num_layers": 5,
             "tcn_kernel_size": 3,
-            "tcn_version": "v1",
+            "tcn_version": "light-tcn-v1",
             "tcn_dropout": 0.1,
         },
         "light": {
@@ -279,7 +297,7 @@ def create_fall_detector(
             "tcn_hidden_dim": 32,
             "tcn_num_layers": 4,
             "tcn_kernel_size": 3,
-            "tcn_version": "v2",
+            "tcn_version": "light-tcn-v2",
             "tcn_dropout": 0.1,
         },
         "large": {
@@ -287,8 +305,32 @@ def create_fall_detector(
             "tcn_hidden_dim": 128,
             "tcn_num_layers": 6,
             "tcn_kernel_size": 5,
-            "tcn_version": "v1",
+            "tcn_version": "light-tcn-v1",
             "tcn_dropout": 0.2,
+        },
+        "transformer-tcn-standard": {
+            "motion_feature_dim": 48,
+            "tcn_hidden_dim": 64,
+            "tcn_num_layers": 3,
+            "tcn_kernel_size": 3,
+            "tcn_version": "transformer-tcn-standard",
+            "tcn_dropout": 0.1,
+        },
+        "transformer-tcn-efficient": {
+            "motion_feature_dim": 48,
+            "tcn_hidden_dim": 48,
+            "tcn_num_layers": 2,
+            "tcn_kernel_size": 3,
+            "tcn_version": "transformer-tcn-efficient",
+            "tcn_dropout": 0.1,
+        },
+        "transformer-tcn-light": {
+            "motion_feature_dim": 32,
+            "tcn_hidden_dim": 32,
+            "tcn_num_layers": 2,
+            "tcn_kernel_size": 3,
+            "tcn_version": "transformer-tcn-light",
+            "tcn_dropout": 0.1,
         },
     }
     

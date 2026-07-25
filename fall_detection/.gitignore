@@ -1,4 +1,4 @@
-# Python
+# ─── Python ───
 __pycache__/
 *.py[cod]
 *.egg-info/
@@ -6,41 +6,51 @@ dist/
 build/
 *.egg
 
-# Virtual environments
+# ─── Virtual environments ───
 .venv/
 venv/
 env/
 
-# IDE
+# ─── IDE ───
 .vscode/
 .idea/
 *.swp
 *.swo
 
-# PyTorch / checkpoints
-checkpoints/*
-!checkpoints/.gitkeep
+# ─── Large dataset (别人自己下载) ───
+data/train/
+data/val/
+data/test/
+data/raw/
+data/__pycache__/
 
-# Output
-output/*
+# ─── Model checkpoints ───
+checkpoints/
 
-# Data
-data/*/raw/
-data/*/videos/
+# ─── Inference output / test videos ───
+outputs/
+inference_test/
 
-# Model files
+# ─── Model files ───
 *.pt
 *.pth
 *.onnx
 *.om
 *.mindir
+yolov8n-pose.pt
 
-# OS
+# ─── Large archives (OmniFall 9.72GB) ───
+*.tar
+
+# ─── Evaluation report ───
+eval_report/
+
+# ─── OS ───
 .DS_Store
 Thumbs.db
 
-# Notebook checkpoints
+# ─── Notebook checkpoints ───
 .ipynb_checkpoints/
 
-# Logs
+# ─── Logs ───
 *.log

@@ -132,14 +132,22 @@ def train_epoch(
     # 计算指标
     all_preds = np.concatenate([p.reshape(-1) for p in all_preds])
     all_labels = np.concatenate([l.reshape(-1) for l in all_labels])
+    
+    # 检查是否有正样本
+    n_pos = all_labels.sum()
+    n_neg = len(all_labels) - n_pos
+    
     metrics = compute_metrics(all_preds, all_labels)
     
     avg_loss = total_loss / len(dataloader)
     
-    return {
-        "loss": avg_loss,
-        **metrics,
-    }
+    result = {"loss": avg_loss}
+    if metrics:
+        result.update(metrics)
+    else:
+        result.update({"accuracy": 0, "precision": 0, "recall": 0, "f1_score": 0})
+    
+    return result
 
 
 @torch.no_grad()
@@ -173,14 +181,22 @@ def validate(
     
     all_preds = np.concatenate([p.reshape(-1) for p in all_preds])
     all_labels = np.concatenate([l.reshape(-1) for l in all_labels])
+    
+    # 检查是否有正样本
+    n_pos = all_labels.sum()
+    n_neg = len(all_labels) - n_pos
+    
     metrics = compute_metrics(all_preds, all_labels)
     
     avg_loss = total_loss / len(dataloader)
     
-    return {
-        "loss": avg_loss,
-        **metrics,
-    }
+    result = {"loss": avg_loss}
+    if metrics:
+        result.update(metrics)
+    else:
+        result.update({"accuracy": 0, "precision": 0, "recall": 0, "f1_score": 0})
+    
+    return result
 
 
 def main():
@@ -199,7 +215,8 @@ def main():
     parser.add_argument("--save_dir", type=str, default="checkpoints",
                        help="模型保存目录")
     parser.add_argument("--version", type=str, default="standard",
-                       choices=["standard", "light", "large"],
+                       choices=["standard", "light", "large", 
+                                "transformer-tcn-standard", "transformer-tcn-efficient", "transformer-tcn-light"],
                        help="模型版本")
     
     args = parser.parse_args()
@@ -365,6 +382,43 @@ def main():
     print(f"训练完成! 最佳 F1: {best_f1:.4f}")
     print(f"模型保存到: {save_dir}")
     print(f"{'='*60}")
+    
+    # ── 最终测试集评估 ──
+    test_dir = "data/test"
+    if os.path.exists(test_dir):
+        print(f"\n{'='*60}")
+        print(f"最终测试集评估: {test_dir}")
+        print(f"{'='*60}")
+        
+        # 加载最佳模型
+        best_path = os.path.join(save_dir, "best.pth")
+        if os.path.exists(best_path):
+            checkpoint = torch.load(best_path, map_location=device, weights_only=False)
+            model.load_state_dict(checkpoint["model_state_dict"])
+            print(f"[Test] 加载最佳模型 (epoch={checkpoint['epoch']}, F1={best_f1:.4f})")
+        
+        test_loader = create_dataloader(
+            test_dir,
+            sequence_length=config.get("training", {}).get("sequence_length", 32),
+            batch_size=batch_size,
+            stride=config.get("training", {}).get("stride", 8),
+            mode="val",
+            use_augmentation=False,
+        )
+        
+        test_metrics = validate(model, test_loader, criterion, device)
+        
+        print(f"\n  测试集指标:")
+        print(f"    Accuracy:  {test_metrics.get('accuracy', 0):.4f}")
+        print(f"    Precision: {test_metrics.get('precision', 0):.4f}")
+        print(f"    Recall:    {test_metrics.get('recall', 0):.4f}")
+        print(f"    F1 Score:  {test_metrics.get('f1_score', 0):.4f}")
+        print(f"    AUC-ROC:   {test_metrics.get('auc_roc', 0):.4f}")
+        print(f"    FPR:       {test_metrics.get('false_positive_rate', 0):.4f}")
+        print(f"    Miss Rate: {test_metrics.get('miss_rate', 0):.4f}")
+        print(f"    TP:{test_metrics.get('tp', 0)} FP:{test_metrics.get('fp', 0)} "
+              f"FN:{test_metrics.get('fn', 0)} TN:{test_metrics.get('tn', 0)}")
+        print(f"{'='*60}")
 
 
 if __name__ == "__main__":

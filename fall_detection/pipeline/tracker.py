@@ -116,6 +116,7 @@ class ByteTrackWrapper:
         
         # Step 3: 低分框与剩余未匹配跟踪匹配
         remaining_dets = [high_score_dets[i] for i in unmatched_dets] + low_score_dets
+        matched2 = []  # 初始化，防止 UnboundLocalError
         
         if len(remaining_dets) > 0:
             remaining_trks = [active_tracks[i] for i in unmatched_trks]

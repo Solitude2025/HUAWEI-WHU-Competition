@@ -58,6 +58,8 @@ class FrameResult:
     fall_probs: Dict[int, float]    # track_id → probability
     alarms: Dict[int, bool]          # track_id → alarm
     features: Optional[Dict[int, np.ndarray]] = None
+    is_detect_frame: bool = True     # 当前帧是否执行了 YOLO 检测
+    detected_ids: set = field(default_factory=set)  # 当前帧 YOLO 实际检测到的 track_id
 
 
 @dataclass
@@ -229,11 +231,25 @@ class FallDetectionPipeline:
         # Step 1: YOLO Pose 检测（可能跳过）
         if frame_idx % self.detection_interval == 0:
             detections = self.detector.detect(frame, (h, w))
+            is_detect_frame = True
         else:
             detections = []
+            is_detect_frame = False
         
         # Step 2: ByteTrack 跟踪
         tracked = self.tracker.update(detections, self.detection_interval)
+        
+        # 记录当前帧 YOLO 实际检测到的 track_id 集合
+        # （tracker 会在检测帧将 detection 和 track 绑定，非检测帧则用历史位置）
+        detected_ids = set()
+        if is_detect_frame and detections:
+            # 通过比较当前 detections 和 tracked 中的位置来找到匹配的 track_id
+            for track_id, tdet in tracked.items():
+                for det in detections:
+                    # 比较关键点是否一致（同一个 detection）
+                    if np.array_equal(tdet.keypoints, det.keypoints):
+                        detected_ids.add(track_id)
+                        break
         
         # Step 3-6: 对每个跟踪的人体处理
         fall_probs = {}
@@ -303,6 +319,8 @@ class FallDetectionPipeline:
             fall_probs=fall_probs,
             alarms=alarms,
             features=frame_features if frame_features else None,
+            is_detect_frame=is_detect_frame,
+            detected_ids=detected_ids,
         )
     
     def _record_fall_event(self, track_id: int, frame_idx: int, probability: float):
@@ -361,12 +379,11 @@ class FallDetectionPipeline:
         if self.save_video:
             w = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
             h = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
-            out_path = os.path.join(
-                self.output_dir,
-                f"fall_detection_{os.path.basename(video_path)}"
-            )
+            basename = os.path.basename(video_path)
+            out_path = os.path.join(self.output_dir, basename)
             fourcc = cv2.VideoWriter_fourcc(*'mp4v')
             writer = cv2.VideoWriter(out_path, fourcc, fps, (w, h))
+            print(f"[Pipeline] 输出视频: {out_path}")
         
         while True:
             ret, frame = cap.read()
@@ -487,42 +504,121 @@ class FallDetectionPipeline:
         frame: np.ndarray,
         result: FrameResult,
     ) -> np.ndarray:
-        """在图像上绘制检测结果"""
+        """在图像上绘制检测结果：骨架、边框、Fall 状态"""
+        from utils.visualization import SKELETON_CONNECTIONS, SKELETON_COLORS
+
         h, w = frame.shape[:2]
         vis = frame.copy()
-        
+
+        # ── 判断是否有人发生跌倒 ──
+        has_any_fall = any(result.fall_probs.values())
+        is_any_alarm = any(result.alarms.values())
+
+        # ── 左上角：Fall 状态面板 ──
+        panel_x, panel_y = 15, 15
+        panel_w, panel_h = 260, 70
+        # 半透明背景
+        overlay = vis.copy()
+        if is_any_alarm:
+            cv2.rectangle(overlay, (panel_x, panel_y),
+                         (panel_x + panel_w, panel_y + panel_h), (0, 0, 60), -1)
+        else:
+            cv2.rectangle(overlay, (panel_x, panel_y),
+                         (panel_x + panel_w, panel_y + panel_h), (30, 30, 30), -1)
+        cv2.addWeighted(overlay, 0.7, vis, 0.3, 0, vis)
+        # 边框
+        border_color = (0, 0, 255) if is_any_alarm else (100, 100, 100)
+        cv2.rectangle(vis, (panel_x, panel_y),
+                     (panel_x + panel_w, panel_y + panel_h), border_color, 2)
+
+        # Fall 状态文字
+        if is_any_alarm:
+            status_text = "Fall: YES"
+            status_color = (0, 0, 255)  # 红色
+        else:
+            status_text = "Fall: Not"
+            status_color = (0, 255, 0)  # 绿色
+
+        cv2.putText(vis, status_text, (panel_x + 12, panel_y + 38),
+                   cv2.FONT_HERSHEY_DUPLEX, 1.2, status_color, 2, cv2.LINE_AA)
+
+        # 显示最高概率
+        if result.fall_probs:
+            max_prob = max(result.fall_probs.values())
+            prob_text = f"Prob: {max_prob:.3f}"
+            cv2.putText(vis, prob_text, (panel_x + 12, panel_y + 62),
+                       cv2.FONT_HERSHEY_SIMPLEX, 0.5, (200, 200, 200), 1, cv2.LINE_AA)
+
+        # ── 绘制每个人体（只绘制当前帧 YOLO 实际检测到的） ──
         for person in result.persons:
+            # 判断这个人体的 track_id
+            # tracker 返回的 dict 中 value 可能有 track_id 属性
+            track_id = getattr(person, 'track_id', -1)
+            if track_id is None or track_id == -1:
+                # 尝试从 fall_probs 的 key 反查
+                if result.fall_probs:
+                    track_id = next(iter(result.fall_probs))
+                else:
+                    continue  # 没有任何 track_id 信息，跳过
+
+            # 在检测帧中：只绘制 YOLO 实际检测到的人体（非追踪器推演的旧位置）
+            # 在非检测帧中：绘制所有活跃的人体
+            if result.is_detect_frame and result.detected_ids:
+                # 检测帧：只画当前帧实际检测到的
+                if track_id not in result.detected_ids and track_id > 0:
+                    continue
+                # 如果 track_id=-1（新检测但还没分配ID），也画
+                if track_id == -1:
+                    pass  # 新检测，画出来
+            # 非检测帧：全部画（追踪器推演的位置，但保留骨架信息）
+
+            person_fall = result.alarms.get(track_id, False)
+            has_alarm = person_fall
+            color_bgr = (0, 0, 255) if has_alarm else (0, 255, 0)
+
             # 画边界框
             bbox = person.bbox * np.array([w, h, w, h])
             bbox = bbox.astype(int)
-            
-            # 检测是否有人体且报警
-            has_alarm = False
-            for track_id, alarm in result.alarms.items():
-                if alarm:
-                    has_alarm = True
-                    break
-            
-            color = (0, 0, 255) if has_alarm else (0, 255, 0)  # 红/绿
-            cv2.rectangle(vis, (bbox[0], bbox[1]), (bbox[2], bbox[3]), color, 2)
-            
-            # 画关键点
-            for kp in person.keypoints:
-                if kp[2] > 0.3:  # 置信度足够
-                    px, py = int(kp[0] * w), int(kp[1] * h)
-                    cv2.circle(vis, (px, py), 3, color, -1)
-            
-            # 显示概率
+            cv2.rectangle(vis, (bbox[0], bbox[1]), (bbox[2], bbox[3]), color_bgr, 2)
+
+            # ── 画骨架连线 ──
+            kp_pixel = person.keypoints[:, :2] * np.array([w, h])
+            kp_pixel = kp_pixel.astype(int)
+            kp_conf = person.keypoints[:, 2]
+
+            for conn_idx, (i, j) in enumerate(SKELETON_CONNECTIONS):
+                if kp_conf[i] > 0.3 and kp_conf[j] > 0.3:
+                    pt1 = tuple(kp_pixel[i])
+                    pt2 = tuple(kp_pixel[j])
+                    line_clr = SKELETON_COLORS[conn_idx % len(SKELETON_COLORS)]
+                    cv2.line(vis, pt1, pt2, line_clr, 2, cv2.LINE_AA)
+
+            # ── 画关键点圆点 ──
+            for i in range(17):
+                if kp_conf[i] > 0.3:
+                    px, py = kp_pixel[i]
+                    cv2.circle(vis, (px, py), 4, (255, 255, 255), -1, cv2.LINE_AA)
+                    cv2.circle(vis, (px, py), 5, color_bgr, 2, cv2.LINE_AA)
+
+            # 在人体框上方显示概率
+            prob_display = 0.0
             for track_id, prob in result.fall_probs.items():
-                if prob > 0.3:
-                    text = f"Fall: {prob:.2f}"
-                    cv2.putText(vis, text, (bbox[0], bbox[1] - 10),
-                               cv2.FONT_HERSHEY_SIMPLEX, 0.6, color, 2)
-        
-        # 帧号
-        cv2.putText(vis, f"Frame: {result.frame_idx}",
-                   (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255, 255, 255), 2)
-        
+                prob_display = max(prob_display, prob)
+            label = f"{'FALL' if has_alarm else 'Normal'} {prob_display:.2f}"
+            (tw, th), _ = cv2.getTextSize(label, cv2.FONT_HERSHEY_SIMPLEX, 0.55, 2)
+            cv2.rectangle(vis, (bbox[0], bbox[1] - th - 8),
+                         (bbox[0] + tw + 6, bbox[1]), color_bgr, -1)
+            cv2.putText(vis, label, (bbox[0] + 3, bbox[1] - 5),
+                       cv2.FONT_HERSHEY_SIMPLEX, 0.55, (255, 255, 255), 2, cv2.LINE_AA)
+
+        # ── 右下角：帧号 ──
+        frame_text = f"Frame: {result.frame_idx}"
+        (fw, fh), _ = cv2.getTextSize(frame_text, cv2.FONT_HERSHEY_SIMPLEX, 0.6, 2)
+        cv2.rectangle(vis, (w - fw - 25, h - fh - 20),
+                     (w - 10, h - 8), (0, 0, 0), -1)
+        cv2.putText(vis, frame_text, (w - fw - 20, h - 14),
+                   cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 255, 255), 2, cv2.LINE_AA)
+
         return vis
     
     def _save_results(
@@ -531,9 +627,6 @@ class FallDetectionPipeline:
         video_path: str,
     ):
         """保存推理结果到 JSON"""
-        if not self.save_video:
-            return
-        
         basename = os.path.splitext(os.path.basename(video_path))[0]
         result_path = os.path.join(self.output_dir, f"{basename}_results.json")
         
