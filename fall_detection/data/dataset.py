@@ -229,13 +229,15 @@ class FallDetectionDataset(Dataset):
             if np.random.random() < self.balance_ratio:
                 # 采样跌倒样本
                 if self.fall_indices:
-                    person_dir, start, _ = random.choice(self.fall_indices)
+                    idx = random.choice(self.fall_indices)
+                    person_dir, start, _ = self.sequences[idx]
                 else:
                     person_dir, start, _ = self.sequences[index]
             else:
                 # 采样正常样本
                 if self.normal_indices:
-                    person_dir, start, _ = random.choice(self.normal_indices)
+                    idx = random.choice(self.normal_indices)
+                    person_dir, start, _ = self.sequences[idx]
                 else:
                     person_dir, start, _ = self.sequences[index]
         else:
