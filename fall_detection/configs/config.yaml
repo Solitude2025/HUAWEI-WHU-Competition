@@ -1,0 +1,116 @@
+# ============================================================
+# 跌倒检测系统配置文件
+# 面向低算力端侧平台基于视觉的实时跌倒检测
+# ============================================================
+
+# --- 模型配置 ---
+model:
+  name: "LightSpatialTemporalFallDetector"
+  version: "standard"  # standard / light / large
+  
+  # Motion Feature Encoder
+  motion_encoder:
+    feature_dim: 48
+    frame_window: 3
+  
+  # Light-TCN
+  tcn:
+    version: "v1"          # v1 (标准) / v2 (深度可分离)
+    hidden_dim: 64
+    num_layers: 5
+    kernel_size: 3
+    dilations: [1, 2, 4, 8, 16]
+    dropout: 0.1
+  
+  # Rule Refinement
+  rule:
+    torso_angle_threshold: 0.5       # 弧度 ≈ 30°
+    torso_angle_duration: 8
+    velocity_peak_threshold: 0.02
+    stillness_threshold: 0.005
+    stillness_duration: 15
+    vote_window: 10
+    vote_threshold: 0.6
+    recovery_duration: 5
+    tcn_prob_threshold: 0.5
+    aspect_ratio_change_threshold: 0.3
+    fall_memory_frames: 60
+
+# --- 检测器配置 ---
+detector:
+  model: "yolov8n-pose.pt"   # YOLOv8n-pose 模型路径
+  device: "cpu"              # cpu / cuda / npu
+  input_size: [640, 384]     # [width, height]
+  conf_threshold: 0.25
+  iou_threshold: 0.7
+  kp_conf_threshold: 0.3
+  max_det: 5
+
+# --- 跟踪器配置 ---
+tracker:
+  track_thresh: 0.5
+  match_thresh: 0.8
+  second_match_thresh: 0.5
+  track_buffer: 30
+  frame_rate: 30
+
+# --- 推理管线配置 ---
+pipeline:
+  sequence_length: 32
+  detection_interval: 2      # YOLO 检测间隔（隔N帧）
+  ir_mode: false             # 红外模式
+  alarm_cooldown_frames: 30
+  save_video: false
+  output_dir: "output"
+
+# --- 训练配置 ---
+training:
+  data_dir: "data/train"
+  val_dir: "data/val"
+  batch_size: 32
+  epochs: 100
+  learning_rate: 0.001
+  weight_decay: 0.0001
+  lr_scheduler: "cosine"     # cosine / step / plateau
+  warmup_epochs: 5
+  early_stopping: 15
+  gradient_clip: 1.0
+  sequence_length: 32
+  stride: 8
+  use_augmentation: true
+  
+  # 损失权重
+  loss:
+    bce_weight: 1.0
+    focal_alpha: 0.25
+    focal_gamma: 2.0
+  
+  # 保存
+  save_dir: "checkpoints"
+  log_interval: 10
+  eval_interval: 1
+
+# --- 数据增强配置 ---
+augmentation:
+  ir_prob: 0.3
+  erase_prob: 0.3
+  perspective_prob: 0.2
+  blur_prob: 0.2
+  lowlight_prob: 0.3
+  jitter_std: 0.01
+  drop_prob: 0.1
+
+# --- 部署配置 ---
+deployment:
+  export_format: "onnx"      # onnx / torchscript / mindir
+  precision: "fp16"          # fp32 / fp16 / int8
+  target_npu: "ascend310"    # ascend310 / rk3588 / generic
+  max_batch_size: 1
+  dynamic_axes: true
+
+# --- 赛题合规检查 ---
+compliance:
+  max_params: 20000000       # 20M
+  max_model_size_mb: 80      # 80MB FP32
+  max_latency_ms: 100        # 100ms
+  max_npu_memory_mb: 20      # 20MB

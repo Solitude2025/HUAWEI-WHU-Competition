@@ -1,0 +1,23 @@
+# 核心框架
+torch>=2.0.0
+torchvision>=0.15.0
+numpy>=1.21.0
+
+# YOLO Pose 检测
+ultralytics>=8.0.0
+opencv-python>=4.5.0
+
+# 数据处理
+scikit-learn>=1.0.0
+pyyaml>=6.0
+tqdm>=4.60.0
+
+# 可视化（可选）
+matplotlib>=3.5.0
+
+# ONNX 导出（可选）
+onnx>=1.12.0
+onnxruntime>=1.12.0
+
+# 模型分析（可选）
+# thop>=0.1.0
