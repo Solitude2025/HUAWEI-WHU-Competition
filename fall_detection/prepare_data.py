@@ -1,713 +1,663 @@
 """
 数据下载与预处理脚本
 ======================
-一键下载两个参考数据集，并用 YOLOv8n-Pose 提取关键点，
+下载两个参考数据集，用 YOLOv8n-Pose 提取关键点，
 转为项目训练所需的 keypoints/bboxes/labels 格式。
 
-支持的参考数据集:
-1. OmniFall (HuggingFace) - 综合跌倒检测基准
-2. Fall Video Dataset (Kaggle) - 多来源编译
-
 用法:
-    # 完整流程（下载两个数据集 + 提取关键点 + 训练/验证集划分）
-    python prepare_data.py --all
-
-    # 只处理 OmniFall（推荐，数据质量高）
+    # 从 OmniFall（HuggingFace）下载，提取关键点
     python prepare_data.py --omnifall
 
-    # 只处理 Kaggle 数据集
+    # 从 Kaggle 下载
     python prepare_data.py --kaggle
 
-    # 仅从已有视频目录提取关键点
-    python prepare_data.py --video_dir path/to/videos --labels path/to/labels.txt
+    # 生成演示用的合成数据（无网络也可用）
+    python prepare_data.py --demo
 
-    # 指定输出目录
-    python prepare_data.py --all --output data/processed
+    # 完整流程
+    python prepare_data.py --all
 """
 
 import os
 import sys
-import argparse
 import json
 import numpy as np
-from tqdm import tqdm
 import subprocess
-from pathlib import Path
-import tempfile
 import shutil
-import zipfile
+from pathlib import Path
 
-# 添加项目路径
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+
+
+def _download_file(url: str, save_path: str, desc: str = ""):
+    """
+    下载文件并显示进度条
+    
+    用 requests + tqdm，保证进度条可见。
+    支持断点续传（如果本地已有部分文件）。
+    """
+    import requests
+    from tqdm import tqdm as _tqdm
+
+    # 检查已有部分下载
+    headers = {}
+    mode = "wb"
+    if os.path.exists(save_path):
+        existing_size = os.path.getsize(save_path)
+        if existing_size > 0:
+            headers["Range"] = f"bytes={existing_size}-"
+            mode = "ab"
+    else:
+        existing_size = 0
+
+    # 先发 HEAD 请求获取总大小
+    resp_head = requests.head(url, allow_redirects=True, timeout=10)
+    total_size = int(resp_head.headers.get("content-length", 0))
+
+    if existing_size >= total_size:
+        print(f"   文件已存在 ({total_size / 1024**3:.2f} GB)")
+        return
+
+    # 下载
+    resp = requests.get(url, stream=True, timeout=30, headers=headers)
+    resp.raise_for_status()
+
+    desc_text = desc or os.path.basename(save_path)
+    unit = "GB" if total_size > 1024**3 else "MB"
+    div = 1024**3 if unit == "GB" else 1024**2
+    total_display = total_size / div
+
+    with _tqdm(
+        total=total_size,
+        unit="B",
+        unit_scale=True,
+        desc=f"  {desc_text}",
+        initial=existing_size,
+        ascii=True,
+        ncols=80,
+    ) as pbar:
+        with open(save_path, mode) as f:
+            for chunk in resp.iter_content(chunk_size=1024 * 1024):  # 1MB chunks
+                if chunk:
+                    f.write(chunk)
+                    pbar.update(len(chunk))
+
+    actual_size = os.path.getsize(save_path)
+    print(f"   完成: {actual_size / 1024**3:.2f} GB")
 
 
 def check_dependencies():
     """检查并安装所需依赖"""
-    deps = {
-        "datasets": "datasets",
-        "torch": "torch",
-        "ultralytics": "ultralytics",
-        "opencv": "opencv-python",
-        "kagglehub": "kagglehub",
-    }
-
+    deps = {"datasets": "datasets", "ultralytics": "ultralytics", "requests": "requests"}
     missing = []
     for name, pkg in deps.items():
         try:
-            __import__(name.replace("-", "_").split(".")[0])
+            __import__(name.replace("-", "_"))
         except ImportError:
             missing.append(pkg)
-
     if missing:
         print(f"[DataPrep] 安装缺失依赖: {', '.join(missing)}")
-        subprocess.check_call([sys.executable, "-m", "pip", "install", *missing])
-        print("[DataPrep] 依赖安装完成")
+        subprocess.check_call([sys.executable, "-m", "pip", "install", *missing, "-q"])
 
 
-def load_omnifall_dataset(
-    output_dir: str,
-    config: str = "of-sta-cs",
-    max_samples: int = None,
-):
-    """
-    加载 OmniFall 数据集
-    
-    OmniFall 由 8 个公开跌倒检测数据集整合而成，
-    支持 staged (实验室场景) 和 in-the-wild (野外场景)。
-    
-    Args:
-        output_dir: 输出目录
-        config: 数据集配置
-            - "of-sta-cs": 仅实验室场景 (recommended for training)
-            - "of-sta-to-all-cs": 实验室→全场景
-            - "of-syn": 合成数据
-        max_samples: 最大样本数（用于测试）
-    
-    数据格式:
-        OmniFall 样本包含:
-        - path: 视频/帧序列路径
-        - label: 0=非跌倒, 1=跌倒
-        - start/end: 事件时间戳
-    """
-    print(f"\n{'='*60}")
-    print(f"[DataPrep] 加载 OmniFall 数据集 (config={config})")
-    print(f"{'='*60}")
+def setup_yolo():
+    """初始化 YOLOv8n-Pose 检测器"""
+    from ultralytics import YOLO
+    model_path = "yolov8n-pose.pt"
+    if not os.path.exists(model_path):
+        print("[DataPrep] 下载 YOLOv8n-Pose 模型...")
+    model = YOLO(model_path)
+    print(f"[DataPrep] YOLO 加载完成")
 
-    from datasets import load_dataset
+    # 检测器包装类
+    class Detector:
+        def __init__(self, model, conf=0.25):
+            self.model = model
+            self.conf = conf
 
-    # 加载数据集
-    ds = load_dataset("simplexsigil2/omnifall", config, split="train")
+        def detect(self, image):
+            from pipeline.detector import PersonDetection
+            import torch
+            h_orig, w_orig = image.shape[:2]
+            results = self.model(image, conf=self.conf, verbose=False)
+            detections = []
+            for result in results:
+                if result.keypoints is None:
+                    continue
+                boxes = result.boxes
+                kp_data = result.keypoints
+                if boxes is None or len(boxes) == 0:
+                    continue
+                for i in range(len(boxes)):
+                    box = boxes.xyxy[i].cpu().numpy()
+                    conf = float(boxes.conf[i].cpu().numpy())
+                    bbox_norm = np.array([
+                        box[0] / w_orig, box[1] / h_orig,
+                        box[2] / w_orig, box[3] / h_orig,
+                    ])
+                    kp = kp_data.xy[i].cpu().numpy()
+                    kp_conf = kp_data.conf[i].cpu().numpy()
+                    kp_full = np.concatenate([
+                        kp / np.array([w_orig, h_orig]),
+                        kp_conf[:, None],
+                    ], axis=1)
+                    detections.append(PersonDetection(bbox=bbox_norm, keypoints=kp_full, confidence=conf))
+            return detections
 
-    if max_samples:
-        ds = ds.select(range(min(max_samples, len(ds))))
-    
-    print(f"[DataPrep] OmniFall 加载完成: {len(ds)} 条记录")
-    print(f"[DataPrep] 列: {ds.column_names}")
-    print(f"[DataPrep] 标签分布: {ds.info.features['label'].names if hasattr(ds.info.features, 'label') else 'binary'}")
-
-    # 统计标签分布
-    labels = ds["label"]
-    fall_count = sum(1 for l in labels if l == 1)
-    normal_count = sum(1 for l in labels if l == 0)
-    print(f"[DataPrep]   跌倒样本: {fall_count}")
-    print(f"[DataPrep]   非跌倒: {normal_count}")
-
-    # 保存元数据
-    os.makedirs(output_dir, exist_ok=True)
-    meta_path = os.path.join(output_dir, "omnifall_metadata.json")
-
-    # 只保存必要字段
-    metadata = []
-    for i in range(len(ds)):
-        metadata.append({
-            "index": i,
-            "path": ds[i].get("path", ""),
-            "label": int(ds[i]["label"]),
-            "start": ds[i].get("start", 0),
-            "end": ds[i].get("end", 0),
-        })
-
-    with open(meta_path, "w") as f:
-        json.dump(metadata, f, indent=2)
-
-    print(f"[DataPrep] 元数据保存到: {meta_path}")
-
-    return ds
+    return Detector(model)
 
 
-def load_omnifall_with_video(
-    output_dir: str,
-    config: str = "of-syn",
-    max_samples: int = 100,
-):
-    """
-    加载 OmniFall 合成数据集并获取视频路径
-    
-    of-syn 合成数据包含自动化生成的跌倒视频，
-    可以直接下载视频文件。
-    
-    of-syn 约 9.1GB，下载可能需要一些时间。
-    """
-    print(f"\n{'='*60}")
-    print(f"[DataPrep] 下载 OmniFall 合成视频 (config={config})")
-    print(f"{'='*60}")
-
-    try:
-        import omnifall
-
-        # 加载带视频的数据集
-        ds = omnifall.load(config, video=True)
-
-        if max_samples:
-            ds = ds.select(range(min(max_samples, len(ds))))
-
-        # 获取视频路径
-        video_paths = ds["video"]
-        labels = ds["label"]
-
-        print(f"[DataPrep] 获取到 {len(video_paths)} 个视频")
-        print(f"[DataPrep]   跌倒: {sum(1 for l in labels if l == 1)}")
-        print(f"[DataPrep]   非跌倒: {sum(1 for l in labels if l == 0)}")
-
-        # 保存视频路径列表
-        video_list = []
-        for i, (vp, lb) in enumerate(zip(video_paths, labels)):
-            if isinstance(vp, str) and os.path.exists(vp):
-                video_list.append({
-                    "video_path": vp,
-                    "label": int(lb),
-                })
-
-        # 保存到文件
-        os.makedirs(output_dir, exist_ok=True)
-        list_path = os.path.join(output_dir, "omnifall_videos.json")
-        with open(list_path, "w") as f:
-            json.dump(video_list, f, indent=2)
-
-        print(f"[DataPrep] 视频列表保存到: {list_path}")
-
-        return video_list
-
-    except ImportError:
-        print("[DataPrep] omnifall 包未安装，回退到 datasets 模式")
-        return None
-    except Exception as e:
-        print(f"[DataPrep] 加载视频失败: {e}")
-        return None
-
-
-def download_kaggle_dataset(output_dir: str):
-    """
-    下载 Kaggle Fall Video Dataset
-    
-    需要 Kaggle API key (kaggle.json)。
-    如果没有，会提示用户手动下载。
-    
-    Kaggle 数据集由多个来源的跌倒检测视频编译而成。
-    """
-    print(f"\n{'='*60}")
-    print(f"[DataPrep] 下载 Fall Video Dataset (Kaggle)")
-    print(f"{'='*60}")
-
-    kaggle_path = os.path.join(output_dir, "kaggle_fall")
-
-    try:
-        import kagglehub
-
-        # 下载数据集
-        print("[DataPrep] 使用 kagglehub 下载...")
-        path = kagglehub.dataset_download("payutch/fall-video-dataset")
-        print(f"[DataPrep] 下载到: {path}")
-
-        # 复制到输出目录
-        if os.path.isdir(path):
-            if os.path.exists(kaggle_path):
-                shutil.rmtree(kaggle_path)
-            shutil.copytree(path, kaggle_path)
-
-        return kaggle_path
-
-    except ImportError:
-        print("[DataPrep] kagglehub 未安装")
-    except Exception as e:
-        print(f"[DataPrep] kagglehub 下载失败: {e}")
-
-    # 回退方案：手动下载
-    print(f"""
-[DataPrep] ======================== 手动下载指引 ========================
-[DataPrep] 自动下载失败，请手动下载:
-[DataPrep] 
-[DataPrep] 1. 打开: https://www.kaggle.com/datasets/payutch/fall-video-dataset
-[DataPrep] 2. 点击 "Download" 按钮
-[DataPrep] 3. 将下载的 zip 解压到:
-[DataPrep]    {kaggle_path}
-[DataPrep] ==============================================================
-""")
-
-    return kaggle_path if os.path.exists(kaggle_path) else None
-
-
-def process_video_to_keypoints(
-    video_path: str,
-    label: int,
-    output_dir: str,
-    detector=None,
-    sequence_length: int = 32,
-    stride: int = 16,
-    video_id: str = None,
-    max_frames: int = None,
-):
-    """
-    处理单个视频: 用 YOLOv8n-Pose 提取关键点 → 保存
-    
-    Args:
-        video_path: 视频文件路径
-        label: 0=正常, 1=跌倒
-        output_dir: 输出目录
-        detector: YOLO detector 实例
-        sequence_length: 时序窗口长度
-        stride: 滑动步幅
-        video_id: 视频唯一标识
-        max_frames: 最多处理的帧数
-    
-    Returns:
-        num_sequences: 生成的序列数
-    """
+def process_video(video_path, label, output_dir, detector, video_id=None, max_frames=300):
+    """处理单个视频：提取关键点 → 保存 npy"""
     import cv2
+    video_id = video_id or os.path.splitext(os.path.basename(video_path))[0]
 
-    if video_id is None:
-        video_id = os.path.splitext(os.path.basename(video_path))[0]
-
-    # 创建输出目录
-    person_dir = os.path.join(output_dir, video_id, "person_0")
-    os.makedirs(person_dir, exist_ok=True)
-
-    # 打开视频
     cap = cv2.VideoCapture(video_path)
     if not cap.isOpened():
-        print(f"[DataPrep]   无法打开视频: {video_path}")
+        print(f"  [!] 无法打开: {video_path}")
         return 0
 
-    total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
-    fps = cap.get(cv2.CAP_PROP_FPS)
-    if fps <= 0:
-        fps = 30.0
-
-    print(f"[DataPrep]   视频: {os.path.basename(video_path)} | "
-          f"{total_frames} 帧 | {fps:.1f} fps | "
-          f"标签: {'跌倒' if label == 1 else '正常'}")
-
+    total = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
     if max_frames:
-        total_frames = min(total_frames, max_frames)
+        total = min(total, max_frames)
 
-    # 读取所有帧并检测
-    all_keypoints = []
-    all_bboxes = []
-    all_labels = []
-
-    frame_idx = 0
-    while True:
-        if max_frames and frame_idx >= max_frames:
-            break
-
+    kps, bbs = [], []
+    for i in range(total):
         ret, frame = cap.read()
         if not ret:
             break
-
-        # YOLO 检测
         h, w = frame.shape[:2]
-        detections = detector.detect(frame, (h, w))
-
-        if detections:
-            # 取置信度最高的人体
-            best_det = max(detections, key=lambda d: d.confidence)
-            kp = best_det.keypoints
-            bb = best_det.bbox
+        dets = detector.detect(frame)
+        if dets:
+            best = max(dets, key=lambda d: d.confidence)
+            kps.append(best.keypoints)
+            bbs.append(best.bbox)
         else:
-            # 没检测到 → 用空数据
-            kp = np.zeros((17, 3))
-            bb = np.zeros(4)
-
-        all_keypoints.append(kp)
-        all_bboxes.append(bb)
-        all_labels.append(label)
-
-        frame_idx += 1
-
-        if frame_idx % 500 == 0:
-            print(f"[DataPrep]     已处理 {frame_idx}/{total_frames} 帧")
-
+            kps.append(np.zeros((17, 3)))
+            bbs.append(np.zeros(4))
+        if (i + 1) % 100 == 0:
+            print(f"    帧 {i+1}/{total}")
     cap.release()
 
-    if len(all_keypoints) == 0:
-        print(f"[DataPrep]   无有效帧")
+    if len(kps) == 0:
         return 0
 
-    # 转为 numpy 数组
-    all_keypoints = np.stack(all_keypoints)  # (T, 17, 3)
-    all_bboxes = np.stack(all_bboxes)        # (T, 4)
-    all_labels = np.array(all_labels)         # (T,)
-
-    # 保存完整的序列（用于训练时滑动窗口）
-    np.save(os.path.join(person_dir, "keypoints.npy"), all_keypoints)
-    np.save(os.path.join(person_dir, "bboxes.npy"), all_bboxes)
-    np.save(os.path.join(person_dir, "labels.npy"), all_labels)
-
-    # 计算能生成的序列数
-    num_sequences = max(0, (len(all_keypoints) - sequence_length) // stride + 1)
-    print(f"[DataPrep]   保存完成: {len(all_keypoints)} 帧, "
-          f"可生成 {num_sequences} 个序列")
-
-    return num_sequences
+    person_dir = os.path.join(output_dir, video_id, "person_0")
+    os.makedirs(person_dir, exist_ok=True)
+    np.save(os.path.join(person_dir, "keypoints.npy"), np.stack(kps))
+    np.save(os.path.join(person_dir, "bboxes.npy"), np.stack(bbs))
+    np.save(os.path.join(person_dir, "labels.npy"), np.full(len(kps), label))
+    return (len(kps) - 32) // 16 + 1  # 可生成的序列数
 
 
-def process_video_list(
-    video_list: list,
-    output_dir: str,
-    max_videos: int = None,
-    detector=None,
-):
+def download_omnifall(output_dir, detector, max_videos=200):
     """
-    批量处理视频列表
+    下载 OmniFall 合成视频 (HuggingFace) + 提取关键点
     
-    Args:
-        video_list: [(video_path, label), ...]
-        output_dir: 输出目录
-        max_videos: 最多处理的视频数
-        detector: YOLO detector
+    流程:
+    1. 下载 labels/of-syn.csv（标签）
+    2. 下载 data_files/omnifall-synthetic_av1.tar（视频存档, ~9.72GB）
+    3. 解压 tar
+    4. 用 YOLOv8n-Pose 逐帧提取关键点
+    5. 保存为 .npy 格式
+    
+    视频存档包含 12,000 个合成跌倒/日常动作视频，
+    覆盖年龄、体型、环境、视角等多维度变化。
     """
-    total_sequences = 0
+    print(f"\n{'='*60}")
+    print(f"[DataPrep] 下载 OmniFall 合成视频 (9.72 GB)")
+    print(f"{'='*60}")
+    
+    import tarfile, csv
+    
+    omni_dir = os.path.join(output_dir, "omnifall")
+    os.makedirs(omni_dir, exist_ok=True)
+    
+    # ---- 1. 下载标签 ----
+    labels_path = os.path.join(omni_dir, "of-syn.csv")
+    if not os.path.exists(labels_path):
+        print("[1/4] 下载标签文件...")
+        _download_file(
+            url="https://huggingface.co/datasets/simplexsigil2/omnifall/resolve/main/labels/of-syn.csv",
+            save_path=labels_path,
+            desc="标签文件",
+        )
+    else:
+        print(f"[1/4] 标签文件已存在: {labels_path}")
+    
+    # 读取标签
+    label_map = {}  # video_filename -> (label, action_name)
+    with open(labels_path, "r") as f:
+        reader = csv.DictReader(f)
+        for row in reader:
+            path = row.get("path", "")
+            label = int(row.get("label", 0))
+            if path:
+                fname = os.path.basename(path)
+                # label 0=background/stand, 1=fall, 2=sit etc.
+                is_fall = 1 if label == 1 else 0
+                label_map[fname] = is_fall
+    
+    print(f"   标签加载: {len(label_map)} 条")
+    
+    # ---- 2. 下载视频存档 ----
+    tar_path = os.path.join(omni_dir, "omnifall-synthetic_av1.tar")
+    if not os.path.exists(tar_path):
+        print("[2/4] 下载视频存档 (~9.72 GB)...")
+        _download_file(
+            url="https://huggingface.co/datasets/simplexsigil2/omnifall/resolve/main/data_files/omnifall-synthetic_av1.tar",
+            save_path=tar_path,
+            desc="omnifall-synthetic_av1.tar",
+        )
+        print(f"   下载完成: {os.path.getsize(tar_path) / 1024**3:.2f} GB")
+    else:
+        print(f"[2/4] 视频存档已存在: {os.path.getsize(tar_path) / 1024**3:.2f} GB")
+    
+    # ---- 3. 解压 ----
+    video_extract_dir = os.path.join(omni_dir, "videos")
+    if not os.path.isdir(video_extract_dir) or len(os.listdir(video_extract_dir)) == 0:
+        print("[3/4] 解压视频存档...")
+        # 先检查 tar 中是否有 videos/ 前缀
+        with tarfile.open(tar_path, "r") as tar:
+            members = tar.getmembers()
+            # 查看目录结构
+            sample_paths = [m.name for m in members[:5]]
+            print(f"   存档结构: {sample_paths}")
+            
+            # 提取所有 .mp4 文件
+            video_members = [m for m in members if m.name.endswith(".mp4")]
+            print(f"   共 {len(video_members)} 个视频")
+            
+            for i, m in enumerate(video_members[:max_videos]):
+                tar.extract(m, path=video_extract_dir)
+                if (i + 1) % 500 == 0:
+                    print(f"   已解压 {i+1}/{min(max_videos, len(video_members))}")
+        
+        print(f"   解压完成 -> {video_extract_dir}")
+    else:
+        print(f"[3/4] 视频已解压: {video_extract_dir}")
+    
+    # ---- 4. 扫描视频并提取关键点 ----
+    kp_dir = os.path.join(omni_dir, "keypoints")
+    os.makedirs(kp_dir, exist_ok=True)
+    
+    video_files = []
+    for root, _, files in os.walk(video_extract_dir):
+        for f in files:
+            if f.endswith(".mp4"):
+                label = label_map.get(f, 0)
+                video_files.append((os.path.join(root, f), label))
+    
+    print(f"\n[4/4] 提取关键点 (共 {len(video_files)} 个视频)...")
+    total_seqs = 0
     processed = 0
-    failed = 0
-
-    if max_videos:
-        video_list = video_list[:max_videos]
-
-    print(f"\n{'='*60}")
-    print(f"[DataPrep] 批量处理 {len(video_list)} 个视频")
-    print(f"{'='*60}")
-
-    old_stdout = None  # 抑制 ultralytics 过多输出
-
-    for i, item in enumerate(tqdm(video_list, desc="处理视频")):
-        if isinstance(item, dict):
-            video_path = item.get("video_path", item.get("path", ""))
-            label = item.get("label", 0)
-        elif isinstance(item, (list, tuple)):
-            video_path, label = item[0], item[1]
-        else:
-            video_path, label = item, 0
-
-        if not os.path.exists(video_path):
-            failed += 1
-            continue
-
-        try:
-            n_seq = process_video_to_keypoints(
-                video_path=video_path,
-                label=label,
-                output_dir=output_dir,
-                detector=detector,
-                video_id=f"video_{i:04d}",
-            )
-            total_sequences += n_seq
-            processed += 1
-        except Exception as e:
-            print(f"[DataPrep]   处理失败 [{video_path}]: {e}")
-            failed += 1
-
-    print(f"\n{'='*60}")
-    print(f"[DataPrep] 批量处理完成:")
-    print(f"  成功: {processed}, 失败: {failed}")
-    print(f"  生成序列: {total_sequences}")
-    print(f"  数据保存: {output_dir}")
-    print(f"{'='*60}")
-
-    return total_sequences
-
-
-def split_train_val(
-    data_dir: str,
-    val_ratio: float = 0.15,
-):
-    """
-    将数据划分为训练集和验证集
     
-    按视频维度划分（同视频的所有序列在同一 split 中），
-    避免数据泄露。
-    """
-    print(f"\n[DataPrep] 划分训练/验证集 (val_ratio={val_ratio})")
+    for i, (vp, lb) in enumerate(video_files[:max_videos]):
+        n = process_video(vp, lb, kp_dir, detector,
+                          video_id=f"omnifall_{i:04d}", max_frames=300)
+        if n > 0:
+            total_seqs += n
+            processed += 1
+        if (i + 1) % 50 == 0:
+            print(f"   [{i+1}/{min(max_videos, len(video_files))}] 已处理 {processed} 个有效视频")
+    
+    print(f"\n[DataPrep] OmniFall: 处理 {processed} 个视频, {total_seqs} 个序列")
+    return processed
 
-    # 收集所有视频目录
-    videos = sorted([
-        d for d in os.listdir(data_dir)
-        if os.path.isdir(os.path.join(data_dir, d))
-    ])
+
+def download_kaggle(output_dir, detector, max_videos=50):
+    """下载 Kaggle Fall Video Dataset"""
+    print(f"\n{'='*60}")
+    print(f"[DataPrep] 下载 Kaggle Fall Video Dataset")
+    print(f"{'='*60}")
+
+    kaggle_dir = os.path.join(output_dir, "kaggle_raw")
+    os.makedirs(kaggle_dir, exist_ok=True)
+
+    try:
+        import kagglehub
+        print("[DataPrep] 使用 kagglehub 下载...")
+        path = kagglehub.dataset_download("payutch/fall-video-dataset")
+        print(f"[DataPrep] 下载到: {path}")
+        if os.path.isdir(path):
+            if os.path.exists(kaggle_dir):
+                shutil.rmtree(kaggle_dir)
+            shutil.copytree(path, kaggle_dir)
+    except Exception as e:
+        print(f"[DataPrep] kagglehub 下载失败: {e}")
+        print("[DataPrep] 请手动下载:")
+        print("  1. 打开 https://www.kaggle.com/datasets/payutch/fall-video-dataset")
+        print("  2. 点击 Download")
+        print(f"  3. 解压到 {kaggle_dir}")
+        if not os.path.isdir(kaggle_dir):
+            return 0
+
+    # 扫描视频
+    exts = (".mp4", ".avi", ".mov", ".mkv", ".webm")
+    videos = []
+    for root, _, files in os.walk(kaggle_dir):
+        for f in files:
+            if f.lower().endswith(exts):
+                label = 1 if "fall" in f.lower() else 0
+                videos.append((os.path.join(root, f), label))
+
+    print(f"[DataPrep] Kaggle: 找到 {len(videos)} 个视频")
 
     if not videos:
-        print("[DataPrep]   无视频数据，跳过划分")
-        return
+        return 0
 
-    # 随机打乱
+    kp_dir = os.path.join(output_dir, "kaggle", "keypoints")
+    os.makedirs(kp_dir, exist_ok=True)
+    total_seqs = 0
+
+    for i, (vp, lb) in enumerate(videos[:max_videos]):
+        n = process_video(vp, lb, kp_dir, detector, video_id=f"kaggle_{i:04d}")
+        if n > 0:
+            total_seqs += n
+        print(f"  [{i+1}] {os.path.basename(vp)} -> {n} seqs")
+
+    print(f"[DataPrep] Kaggle: 处理 {min(len(videos), max_videos)} 个视频, {total_seqs} 序列")
+    return total_seqs
+
+
+def generate_demo_data(output_dir, num_videos=120):
+    """
+    生成仿真关键点数据，模拟真实跌倒/正常行为
+    
+    相比简单版本，这个版本增加了:
+    - 坐下、弯腰、蹲下等"干扰动作"（接近跌倒但非跌倒）
+    - 关键点抖动（模拟 YOLO 检测噪声）
+    - 关键点部分丢失（模拟遮挡）
+    - 不同跌倒速度（快速跌倒/缓慢滑倒）
+    - 摄像机视角变化
+    - 部分关键点置信度波动
+    """
+    print(f"\n{'='*60}")
+    print(f"[DataPrep] 生成增强仿真数据集 ({num_videos} 个视频)")
+    print(f"{'='*60}")
+
+    data_dir = os.path.join(output_dir, "demo", "keypoints")
+    os.makedirs(data_dir, exist_ok=True)
+    rng = np.random.RandomState(42)
+
+    # 动作类型比例：40% 正常行走站立, 30% 跌倒, 30% 干扰动作(坐下/弯腰/蹲)
+    action_types = []
+    n_fall = num_videos * 3 // 10
+    n_confuse = num_videos * 3 // 10
+    n_normal = num_videos - n_fall - n_confuse
+    for _ in range(n_normal): action_types.append("normal")
+    for _ in range(n_fall): action_types.append("fall")
+    for _ in range(n_confuse): action_types.append("confuse")
+    rng.shuffle(action_types)
+
+    for v in range(num_videos):
+        person_dir = os.path.join(data_dir, f"video_{v:04d}", "person_0")
+        os.makedirs(person_dir, exist_ok=True)
+
+        T = 150  # 更长序列
+        kp = np.zeros((T, 17, 3))
+        bb = np.zeros((T, 4))
+        lbl = np.zeros(T)
+        action = action_types[v]
+
+        # 随机抖动幅度（模拟不同质量的 YOLO 检测）
+        jitter = rng.uniform(0.005, 0.025)
+
+        # 随机检测质量（影响置信度）
+        det_quality = rng.uniform(0.5, 0.95)
+
+        # 视角偏移（模拟不同摄像机角度）
+        view_offset = rng.uniform(-0.1, 0.1)
+
+        # 随机跌倒速度
+        fall_speed = rng.uniform(0.015, 0.035)
+
+        base_x = 0.5 + view_offset
+        base_ymin = rng.uniform(0.03, 0.08)
+        base_ymax = rng.uniform(0.92, 0.97)
+
+        for t in range(T):
+            # -- 基础站立位置 --
+            y_vals = np.linspace(base_ymin, base_ymax, 17)
+            x_vals = np.full(17, base_x)
+
+            if action == "normal":
+                # 正常行走: 轻微左右摆动
+                walk_phase = np.sin(t * 0.05) * 0.02
+                x_vals += walk_phase
+                y_vals += np.sin(t * 0.08 + np.arange(17) * 0.5) * 0.005
+                lbl[t] = 0
+
+                # 偶尔蹲下捡东西然后站起
+                if 60 <= t <= 90:
+                    squat_progress = (t - 60) / 30
+                    if squat_progress < 0.5:
+                        # 蹲下过程：上半身快速下降
+                        factor = squat_progress * 2 * 0.4
+                        y_vals[:11] = y_vals[:11] * (1 - factor) + 0.7 * factor
+                    else:
+                        # 站起过程
+                        factor = (squat_progress - 0.5) * 2 * 0.4
+                        y_vals[:11] = y_vals[:11] * factor + y_vals[:11].mean() * (1 - factor)
+
+            elif action == "confuse":
+                # 干扰动作: 坐下、弯腰、躺下（与跌倒视觉相似）
+                confuse_type = rng.choice(["sit", "bend", "lie"])
+
+                if confuse_type == "sit":
+                    # 坐下: 臀部快速下降，上半身轻微前倾
+                    if 30 <= t < 70:
+                        p = (t - 30) / 40
+                        # 肩部略降，臀部大幅下降
+                        y_vals[:5] += p * 0.05    # 头/眼微降
+                        y_vals[5:7] += p * 0.15   # 肩部降
+                        y_vals[11:13] += p * 0.4  # 臀部大幅降
+                        y_vals[13:] += p * 0.1    # 腿微降
+                        bb[t] = [base_x - 0.18, base_ymin + p * 0.2,
+                                 base_x + 0.18, base_ymax - p * 0.15]
+                    else:
+                        bb[t] = [base_x - 0.18, base_ymin, base_x + 0.18, base_ymax]
+                    lbl[t] = 0
+
+                elif confuse_type == "bend":
+                    # 弯腰: 头部下移，臀部上移
+                    if 30 <= t < 55:
+                        p = (t - 30) / 25
+                        y_vals[0] += p * 0.3       # 鼻下降
+                        y_vals[11:13] -= p * 0.1   # 臀上翘
+                        y_vals[5:7] += p * 0.05
+                    elif 55 <= t < 90:
+                        p = (t - 55) / 35
+                        y_vals[0] -= p * 0.3
+                        y_vals[11:13] += p * 0.1
+                    lbl[t] = 0
+                    bb[t] = [base_x - 0.18, base_ymin, base_x + 0.18, base_ymax]
+
+                else:  # lie
+                    # 躺下: 所有关键点横置 + 缓慢躺平 (极易被误判为跌倒)
+                    if 30 <= t < 80:
+                        p = (t - 30) / 50
+                        # Y 坐标集中到 0.7-0.8 范围
+                        y_vals = y_vals * (1 - p) + np.full(17, 0.75) * p
+                        # X 坐标分散开
+                        x_vals = base_x + np.linspace(-0.2, 0.2, 17) * p
+                        bb[t] = [base_x - 0.2 - p * 0.1, 0.4, base_x + 0.2 + p * 0.1, 0.85]
+                    else:
+                        bb[t] = [base_x - 0.3, 0.4, base_x + 0.3, 0.85]
+                    lbl[t] = 0
+
+            else:  # fall
+                # 跌倒: 所有关键点同时快速下降 + 人体框变宽
+                if 30 <= t < 50:
+                    # 自由落体阶段
+                    p = (t - 30) * fall_speed
+                    y_vals = y_vals * (1 - p) + np.full(17, 0.8) * p
+                    bb[t] = [base_x - 0.18, base_ymin * (1 - p),
+                             base_x + 0.18, 0.95 - (0.95 - base_ymax) * (1 - p)]
+                    lbl[t] = 1
+                elif 50 <= t < 55:
+                    # 撞击地面
+                    lbl[t] = 1
+                    bb[t] = [base_x - 0.18, 0.4, base_x + 0.18, 0.85]
+                else:
+                    # 倒地后静止
+                    y_vals = np.full(17, 0.8) + rng.randn(17) * 0.01
+                    x_vals = base_x + np.linspace(-0.15, 0.15, 17)
+                    bb[t] = [base_x - 0.18, 0.35, base_x + 0.18, 0.85]
+                    lbl[t] = 1
+
+            # -- 添加真实干扰 --
+            # 1. 关键点抖动（YOLO 检测噪声）
+            kp[t, :, 0] = x_vals + rng.randn(17) * jitter
+            kp[t, :, 1] = y_vals + rng.randn(17) * jitter
+
+            # 2. 关键点部分丢失（模拟遮挡）
+            kp[t, :, 2] = det_quality + rng.rand(17) * (1 - det_quality)
+            if rng.random() < 0.1:  # 10% 概率随机遮挡一个关键点
+                occluded = rng.randint(0, 17)
+                kp[t, occluded, 2] = 0.0
+
+            # 3. 边界框噪声
+            if bb[t].sum() == 0:
+                bb[t] = [base_x - 0.18, base_ymin, base_x + 0.18, base_ymax]
+            bb[t] += rng.randn(4) * 0.01
+
+        # 裁剪到有效范围
+        kp[..., :2] = np.clip(kp[..., :2], 0, 1)
+        kp[..., 2] = np.clip(kp[..., 2], 0, 1)
+        bb = np.clip(bb, 0, 1)
+
+        np.save(os.path.join(person_dir, "keypoints.npy"), kp)
+        np.save(os.path.join(person_dir, "bboxes.npy"), bb)
+        np.save(os.path.join(person_dir, "labels.npy"), lbl)
+
+    # 统计
+    fall_count = sum(1 for a in action_types if a == "fall")
+    confuse_count = sum(1 for a in action_types if a == "confuse")
+    normal_count = sum(1 for a in action_types if a == "normal")
+    total_seq = sum(max(0, (150 - 32) // 16 + 1) for _ in range(num_videos))
+    print(f"[DataPrep] 增强仿真数据: {num_videos} 视频, ~{total_seq} 序列")
+    print(f"[DataPrep]   正常行走: {normal_count}, 跌倒: {fall_count}, 干扰动作: {confuse_count}")
+    return num_videos
+
+
+def split_and_copy(source_dir, project_root, val_ratio=0.15):
+    """划分训练/验证集并复制到 data/train, data/val"""
     import random
+
+    videos = sorted([
+        d for d in os.listdir(source_dir)
+        if os.path.isdir(os.path.join(source_dir, d))
+    ])
+    if not videos:
+        return False
+
     random.seed(42)
     random.shuffle(videos)
-
-    # 划分
     n_val = max(1, int(len(videos) * val_ratio))
     val_videos = videos[:n_val]
     train_videos = videos[n_val:]
 
-    print(f"[DataPrep]   训练集: {len(train_videos)} 视频")
-    print(f"[DataPrep]   验证集: {len(val_videos)} 视频")
+    train_dir = os.path.join(project_root, "data", "train")
+    val_dir = os.path.join(project_root, "data", "val")
 
-    # 创建软链接/复制到 train/val 目录
-    train_dir = os.path.join(os.path.dirname(data_dir), "train")
-    val_dir = os.path.join(os.path.dirname(data_dir), "val")
-
-    # 清除旧的
     for d in [train_dir, val_dir]:
         if os.path.exists(d):
             shutil.rmtree(d)
         os.makedirs(d, exist_ok=True)
 
-    # 复制
-    def copy_videos(video_list, target_dir):
-        for vid in video_list:
-            src = os.path.join(data_dir, vid)
-            dst = os.path.join(target_dir, vid)
-            shutil.copytree(src, dst)
+    def copy_list(vlist, target):
+        for v in vlist:
+            src = os.path.join(source_dir, v)
+            dst = os.path.join(target, v)
+            shutil.copytree(src, dst, dirs_exist_ok=True)
 
-    copy_videos(train_videos, train_dir)
-    copy_videos(val_videos, val_dir)
+    copy_list(train_videos, train_dir)
+    copy_list(val_videos, val_dir)
+    print(f"[DataPrep] 划分: 训练 {len(train_videos)} 视频, 验证 {len(val_videos)} 视频")
+    return True
 
-    print(f"[DataPrep]   训练数据: {train_dir} ({len(train_videos)} 视频)")
-    print(f"[DataPrep]   验证数据: {val_dir} ({len(val_videos)} 视频)")
+
+def merge_data_sources(source_dirs, merge_dir):
+    """合并多个数据源到同一个目录"""
+    os.makedirs(merge_dir, exist_ok=True)
+    idx = 0
+    for src in source_dirs:
+        if not os.path.isdir(src):
+            continue
+        for v in os.listdir(src):
+            v_src = os.path.join(src, v)
+            if os.path.isdir(v_src):
+                v_dst = os.path.join(merge_dir, f"{idx:04d}")
+                shutil.copytree(v_src, v_dst, dirs_exist_ok=True)
+                idx += 1
+    return idx
 
 
 def main():
+    import argparse
     parser = argparse.ArgumentParser(description="下载并预处理跌倒检测数据集")
-    parser.add_argument("--all", action="store_true",
-                       help="完整流程（推荐）")
-    parser.add_argument("--omnifall", action="store_true",
-                       help="处理 OmniFall 数据集")
-    parser.add_argument("--kaggle", action="store_true",
-                       help="处理 Kaggle Fall Video Dataset")
-    parser.add_argument("--video_dir", type=str, default=None,
-                       help="自定义视频目录")
-    parser.add_argument("--labels", type=str, default=None,
-                       help="自定义标签文件")
-    parser.add_argument("--output", type=str, default=None,
-                       help="输出目录（默认: data/raw）")
-    parser.add_argument("--max_videos", type=int, default=None,
-                       help="最大处理视频数（测试用）")
-    parser.add_argument("--split", action="store_true", default=True,
-                       help="划分训练/验证集")
-    parser.add_argument("--yolo_model", type=str, default="yolov8n-pose.pt",
-                       help="YOLO 模型路径")
-    parser.add_argument("--sequence_length", type=int, default=32,
-                       help="时序窗口长度")
-    parser.add_argument("--stride", type=int, default=16,
-                       help="滑动步幅")
-    parser.add_argument("--device", type=str, default="cuda",
-                       help="YOLO 推理设备")
-
+    parser.add_argument("--all", action="store_true", help="完整流程(OmniFall+Kaggle+Demo)")
+    parser.add_argument("--omnifall", action="store_true", help="下载 OmniFall")
+    parser.add_argument("--kaggle", action="store_true", help="下载 Kaggle")
+    parser.add_argument("--demo", action="store_true", help="生成仿真数据(推荐入门)")
+    parser.add_argument("--max_videos", type=int, default=30, help="每个数据集最多处理视频数")
+    parser.add_argument("--output", type=str, default=None, help="输出目录")
+    parser.add_argument("--no_split", action="store_true", help="不划分训练/验证集")
     args = parser.parse_args()
 
-    # 设置输出目录
     project_root = os.path.dirname(os.path.abspath(__file__))
-    output_dir = args.output or os.path.join(project_root, "data", "raw")
-    os.makedirs(output_dir, exist_ok=True)
+    raw_dir = args.output or os.path.join(project_root, "data", "raw")
+    os.makedirs(raw_dir, exist_ok=True)
 
-    # 检查依赖
     check_dependencies()
+    detector = setup_yolo()
 
-    # 初始化 YOLO 检测器
-    print(f"\n[DataPrep] 初始化 YOLOv8n-Pose 检测器...")
-    try:
-        from ultralytics import YOLO
-        # 允许从本地加载或自动下载
-        yolo_model_path = args.yolo_model
-        if not os.path.exists(yolo_model_path):
-            print(f"[DataPrep] 模型不存在，将自动下载: {yolo_model_path}")
-        model = YOLO(yolo_model_path)
-        print(f"[DataPrep] YOLO 加载完成")
+    # 收集所有关键点目录
+    kp_sources = []
+    do_everything = args.all or not any([args.omnifall, args.kaggle, args.demo])
 
-        # 创建检测器包装类以供 process_video_to_keypoints 使用
-        class DetectorWrapper:
-            def __init__(self, model, conf=0.25, device="cpu"):
-                self.model = model
-                self.conf = conf
-                self.device = device
+    # ---- 1. OmniFall ----
+    if args.omnifall or do_everything:
+        n = download_omnifall(raw_dir, detector, args.max_videos)
+        if n > 0:
+            kp_sources.append(os.path.join(raw_dir, "omnifall", "keypoints"))
 
-            def detect(self, image, original_shape=None):
-                h_orig, w_orig = image.shape[:2]
-                results = self.model(
-                    image, conf=self.conf, verbose=False, device=self.device
-                )
-                detections = []
-                for result in results:
-                    if result.keypoints is None:
-                        continue
-                    boxes = result.boxes
-                    kp_data = result.keypoints
-                    if boxes is None or len(boxes) == 0:
-                        continue
-                    for i in range(len(boxes)):
-                        from pipeline.detector import PersonDetection
-                        box = boxes.xyxy[i].cpu().numpy()
-                        conf = float(boxes.conf[i].cpu().numpy())
-                        bbox_norm = np.array([
-                            box[0] / w_orig, box[1] / h_orig,
-                            box[2] / w_orig, box[3] / h_orig,
-                        ])
-                        kp = kp_data.xy[i].cpu().numpy()
-                        kp_conf = kp_data.conf[i].cpu().numpy()
-                        kp_full = np.concatenate([
-                            kp / np.array([w_orig, h_orig]),
-                            kp_conf[:, None],
-                        ], axis=1)
-                        det = PersonDetection(
-                            bbox=bbox_norm, keypoints=kp_full, confidence=conf
-                        )
-                        detections.append(det)
-                return detections
+    # ---- 2. Kaggle ----
+    if args.kaggle or do_everything:
+        n = download_kaggle(raw_dir, detector, args.max_videos)
+        if n > 0:
+            kp_sources.append(os.path.join(raw_dir, "kaggle", "keypoints"))
 
-        detector = DetectorWrapper(model, conf=0.25, device=args.device)
+    # ---- 3. 仿真数据（兜底） ----
+    if args.demo or do_everything:
+        n = generate_demo_data(raw_dir, max(60, args.max_videos * 2))
+        kp_sources.append(os.path.join(raw_dir, "demo", "keypoints"))
 
-    except Exception as e:
-        print(f"[DataPrep] YOLO 初始化失败: {e}")
-        print(f"[DataPrep] 将使用模拟检测器")
-        from pipeline.detector import YOLOPoseDetectorSim
-        detector = YOLOPoseDetectorSim()
+    # ---- 合并到 data/merged ----
+    merged_dir = os.path.join(raw_dir, "merged")
+    total = merge_data_sources(kp_sources, merged_dir)
+    print(f"\n[DataPrep] 合计: {total} 个视频")
 
-    # ---- OmniFall 处理 ----
-    if args.omnifall or args.all:
-        omnifall_raw_dir = os.path.join(output_dir, "omnifall")
-        os.makedirs(omnifall_raw_dir, exist_ok=True)
+    if total == 0:
+        print("[DataPrep] !!! 没有成功生成任何数据，请检查网络或使用 --demo")
+        return
 
-        # 第一步：加载元数据
-        ds = load_omnifall_dataset(
-            output_dir=omnifall_raw_dir,
-            config="of-sta-cs",
-            max_samples=args.max_videos,
-        )
+    # ---- 划分训练/验证 ----
+    if not args.no_split:
+        split_and_copy(merged_dir, project_root, val_ratio=0.15)
 
-        # 第二步：尝试获取视频
-        video_list = load_omnifall_with_video(
-            output_dir=omnifall_raw_dir,
-            config="of-syn",
-            max_samples=args.max_videos or 500,
-        )
-
-        # 如果获取到视频，提取关键点
-        if video_list and len(video_list) > 0:
-            kp_output = os.path.join(omnifall_raw_dir, "keypoints")
-            process_video_list(
-                video_list,
-                output_dir=kp_output,
-                detector=detector,
-            )
-
-    # ---- Kaggle 处理 ----
-    if args.kaggle or args.all:
-        kaggle_path = download_kaggle_dataset(output_dir)
-        if kaggle_path and os.path.isdir(kaggle_path):
-            # 扫描视频文件
-            video_exts = (".mp4", ".avi", ".mov", ".mkv", ".webm")
-            video_files = []
-            for root, _, files in os.walk(kaggle_path):
-                for f in files:
-                    if f.lower().endswith(video_exts):
-                        video_files.append(os.path.join(root, f))
-
-            print(f"[DataPrep] Kaggle 数据集中找到 {len(video_files)} 个视频")
-
-            if video_files:
-                kp_output = os.path.join(output_dir, "kaggle", "keypoints")
-                video_list = [(vp, 1 if "fall" in os.path.basename(vp).lower() else 0)
-                             for vp in video_files]
-                process_video_list(video_list, output_dir=kp_output, detector=detector)
-
-    # ---- 自定义视频目录 ----
-    if args.video_dir and os.path.isdir(args.video_dir):
-        print(f"\n[DataPrep] 处理自定义视频目录: {args.video_dir}")
-
-        video_exts = (".mp4", ".avi", ".mov", ".mkv", ".webm")
-        video_files = []
-        for root, _, files in os.walk(args.video_dir):
-            for f in files:
-                if f.lower().endswith(video_exts):
-                    video_files.append(os.path.join(root, f))
-
-        if not video_files:
-            print(f"[DataPrep]   目录中无视频文件")
-        else:
-            # 尝试读取标签
-            label_map = {}
-            if args.labels and os.path.exists(args.labels):
-                with open(args.labels, "r") as f:
-                    for line in f:
-                        parts = line.strip().split()
-                        if len(parts) >= 2:
-                            label_map[parts[0]] = int(parts[1])
-
-            custom_output = os.path.join(output_dir, "custom", "keypoints")
-            video_list = [
-                (vp, label_map.get(os.path.basename(vp), 0))
-                for vp in video_files
-            ]
-            process_video_list(video_list, output_dir=custom_output, detector=detector)
-
-    # ---- 划分训练/验证集 ----
-    if args.split:
-        # 在所有 keypoints 目录中查找
-        kp_dirs = [
-            os.path.join(output_dir, "omnifall", "keypoints"),
-            os.path.join(output_dir, "kaggle", "keypoints"),
-            os.path.join(output_dir, "custom", "keypoints"),
-        ]
-        for kp_dir in kp_dirs:
-            if os.path.isdir(kp_dir):
-                video_count = len([d for d in os.listdir(kp_dir)
-                                   if os.path.isdir(os.path.join(kp_dir, d))])
-                if video_count > 0:
-                    print(f"\n[DataPrep] 在 {kp_dir} 中找到 {video_count} 个视频")
-                    split_train_val(kp_dir)
-
-    # ---- 创建 data/train 和 data/val 的快捷方式 ----
-    # 如果项目中有 data/train 和 data/val 的合并需求
-    train_sources = [
-        os.path.join(output_dir, "omnifall", "keypoints", "train"),
-        os.path.join(output_dir, "kaggle", "keypoints", "train"),
-        os.path.join(output_dir, "custom", "keypoints", "train"),
-    ]
-    val_sources = [
-        os.path.join(output_dir, "omnifall", "keypoints", "val"),
-        os.path.join(output_dir, "kaggle", "keypoints", "val"),
-        os.path.join(output_dir, "custom", "keypoints", "val"),
-    ]
-
-    final_train = os.path.join(project_root, "data", "train")
-    final_val = os.path.join(project_root, "data", "val")
-
-    for final_dir, sources in [(final_train, train_sources), (final_val, val_sources)]:
-        os.makedirs(final_dir, exist_ok=True)
-        dest_idx = 0
-        for src in sources:
-            if os.path.isdir(src):
-                for v in os.listdir(src):
-                    v_src = os.path.join(src, v)
-                    if os.path.isdir(v_src):
-                        v_dst = os.path.join(final_dir, f"{dest_idx:04d}")
-                        shutil.copytree(v_src, v_dst)
-                        dest_idx += 1
+    # 检查最终结果
+    train_dir = os.path.join(project_root, "data", "train")
+    val_dir = os.path.join(project_root, "data", "val")
+    train_count = len([d for d in os.listdir(train_dir) if os.path.isdir(os.path.join(train_dir, d))]) if os.path.isdir(train_dir) else 0
+    val_count = len([d for d in os.listdir(val_dir) if os.path.isdir(os.path.join(val_dir, d))]) if os.path.isdir(val_dir) else 0
 
     print(f"\n{'='*60}")
-    print(f"[DataPrep] 数据处理完成!")
-    print(f"  训练数据: {final_train}")
-    print(f"  验证数据: {final_val}")
-    print(f"\n  现在可以运行: python train.py --data_dir data/train --val_dir data/val --epochs 100")
+    print(f"[DataPrep] 完成!")
+    print(f"  训练集: {train_dir} ({train_count} 视频)")
+    print(f"  验证集: {val_dir} ({val_count} 视频)")
+    print(f"\n  用法: python train.py --data_dir data/train --val_dir data/val --epochs 100")
     print(f"{'='*60}")
 
 

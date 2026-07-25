@@ -80,6 +80,11 @@ class FallDetectionDataset(Dataset):
         # 加载数据索引
         self.sequences = self._load_sequences()
         
+        # 如果没找到数据，回退到合成数据
+        if len(self.sequences) == 0:
+            print(f"[Dataset] 目录 '{data_dir}' 中未找到有效数据，回退到合成数据")
+            self.sequences = self._generate_synthetic_sequences()
+        
         # 平衡采样
         if mode == "train" and balance_ratio > 0:
             self.fall_indices = [i for i, (_, _, l) in enumerate(self.sequences) if l > 0.5]
