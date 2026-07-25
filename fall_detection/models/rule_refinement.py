@@ -59,6 +59,7 @@ class RuleConfig:
     
     # 跌倒状态记忆
     fall_memory_frames: int = 60           # 跌倒后保持报警的帧数
+    rules_min_pass: int = 1                # 物理规则至少通过几条 (1~3)
 
 
 class RuleRefinement(nn.Module):
@@ -334,7 +335,7 @@ class RuleRefinementOnline:
         is_fall = (
             refined > cfg.tcn_prob_threshold
             and vote_ratio > cfg.vote_threshold
-            and rules_passed >= 2
+            and rules_passed >= cfg.rules_min_pass
         )
         
         if is_fall:

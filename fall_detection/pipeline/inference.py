@@ -59,7 +59,7 @@ class FrameResult:
     alarms: Dict[int, bool]          # track_id → alarm
     features: Optional[Dict[int, np.ndarray]] = None
     is_detect_frame: bool = True     # 当前帧是否执行了 YOLO 检测
-    detected_ids: set = field(default_factory=set)  # 当前帧 YOLO 实际检测到的 track_id
+    raw_detections: List[PersonDetection] = field(default_factory=list)  # YOLO 原始检测结果
 
 
 @dataclass
@@ -135,6 +135,8 @@ class FallDetectionPipeline:
         # 输出参数
         save_video: bool = False,
         output_dir: str = "output",
+        # 规则配置（从 config.yaml 传入）
+        rule_config: Optional[RuleConfig] = None,
     ):
         """
         Args:
@@ -172,6 +174,11 @@ class FallDetectionPipeline:
         
         # 在线规则校正（每人体一个实例）
         self.rule_engines: Dict[int, RuleRefinementOnline] = {}
+        
+        # 规则配置（从 config.yaml 传入）
+        self.rule_config = RuleConfig()
+        if rule_config is not None:
+            self.rule_config = rule_config
         
         # 参数
         self.sequence_length = sequence_length
@@ -230,26 +237,16 @@ class FallDetectionPipeline:
         
         # Step 1: YOLO Pose 检测（可能跳过）
         if frame_idx % self.detection_interval == 0:
-            detections = self.detector.detect(frame, (h, w))
+            raw_detections = self.detector.detect(frame, (h, w))
+            detections = raw_detections
             is_detect_frame = True
         else:
+            raw_detections = []
             detections = []
             is_detect_frame = False
         
         # Step 2: ByteTrack 跟踪
         tracked = self.tracker.update(detections, self.detection_interval)
-        
-        # 记录当前帧 YOLO 实际检测到的 track_id 集合
-        # （tracker 会在检测帧将 detection 和 track 绑定，非检测帧则用历史位置）
-        detected_ids = set()
-        if is_detect_frame and detections:
-            # 通过比较当前 detections 和 tracked 中的位置来找到匹配的 track_id
-            for track_id, tdet in tracked.items():
-                for det in detections:
-                    # 比较关键点是否一致（同一个 detection）
-                    if np.array_equal(tdet.keypoints, det.keypoints):
-                        detected_ids.add(track_id)
-                        break
         
         # Step 3-6: 对每个跟踪的人体处理
         fall_probs = {}
@@ -260,7 +257,7 @@ class FallDetectionPipeline:
             # 获取或创建规则引擎
             if track_id not in self.rule_engines:
                 self.rule_engines[track_id] = RuleRefinementOnline(
-                    RuleConfig(),
+                    self.rule_config,
                     history_len=self.sequence_length,
                 )
             
@@ -300,8 +297,8 @@ class FallDetectionPipeline:
                 alarms[track_id] = is_alarm
                 frame_features[track_id] = last_feat
                 
-                # 记录跌倒事件
-                if is_alarm and self._fall_cooldowns.get(track_id, 0) <= 0:
+                # 记录跌倒事件（靠合并逻辑防重复，不依赖track_id冷却）
+                if is_alarm:
                     self._record_fall_event(track_id, frame_idx, refined_prob)
             else:
                 fall_probs[track_id] = 0.0
@@ -320,17 +317,20 @@ class FallDetectionPipeline:
             alarms=alarms,
             features=frame_features if frame_features else None,
             is_detect_frame=is_detect_frame,
-            detected_ids=detected_ids,
+            raw_detections=raw_detections,
         )
     
     def _record_fall_event(self, track_id: int, frame_idx: int, probability: float):
-        """记录跌倒事件"""
-        # 检查是否有正在进行的事件
+        """记录跌倒事件（按时间窗口合并，不区分track_id）"""
+        # ByteTrack 可能频繁分配新 ID，所以按帧窗口合并而非 person_id
         for event in self._fall_events:
-            if event.person_id == track_id and frame_idx - event.end_frame < 30:
+            if frame_idx - event.start_frame < 300:
                 event.end_frame = frame_idx
-                event.max_probability = max(event.max_probability, probability)
                 event.duration_frames = event.end_frame - event.start_frame
+                event.max_probability = max(event.max_probability, probability)
+                # 合并 person 范围
+                if track_id != event.person_id:
+                    event.person_id = -1  # 标记为多人/不稳定
                 return
         
         # 新事件
@@ -342,7 +342,6 @@ class FallDetectionPipeline:
             duration_frames=1,
             timestamp=frame_idx / 30.0,
         ))
-        self._fall_cooldowns[track_id] = self.alarm_cooldown
     
     def process_video(
         self,
@@ -504,20 +503,20 @@ class FallDetectionPipeline:
         frame: np.ndarray,
         result: FrameResult,
     ) -> np.ndarray:
-        """在图像上绘制检测结果：骨架、边框、Fall 状态"""
-        from utils.visualization import SKELETON_CONNECTIONS, SKELETON_COLORS
+        """在图像上绘制检测结果：骨架、边框、Fall 状态
 
+        关键设计：只在 YOLO 检测帧画人体框/骨架，非检测帧只保留状态面板。
+        这样不会出现"旧框残留"问题。
+        """
         h, w = frame.shape[:2]
         vis = frame.copy()
 
-        # ── 判断是否有人发生跌倒 ──
-        has_any_fall = any(result.fall_probs.values())
+        # ── 判断跌倒状态 ──
         is_any_alarm = any(result.alarms.values())
 
-        # ── 左上角：Fall 状态面板 ──
+        # ── 左上角：Fall 状态面板（每帧都画） ──
         panel_x, panel_y = 15, 15
         panel_w, panel_h = 260, 70
-        # 半透明背景
         overlay = vis.copy()
         if is_any_alarm:
             cv2.rectangle(overlay, (panel_x, panel_y),
@@ -526,90 +525,56 @@ class FallDetectionPipeline:
             cv2.rectangle(overlay, (panel_x, panel_y),
                          (panel_x + panel_w, panel_y + panel_h), (30, 30, 30), -1)
         cv2.addWeighted(overlay, 0.7, vis, 0.3, 0, vis)
-        # 边框
         border_color = (0, 0, 255) if is_any_alarm else (100, 100, 100)
         cv2.rectangle(vis, (panel_x, panel_y),
                      (panel_x + panel_w, panel_y + panel_h), border_color, 2)
-
-        # Fall 状态文字
-        if is_any_alarm:
-            status_text = "Fall: YES"
-            status_color = (0, 0, 255)  # 红色
-        else:
-            status_text = "Fall: Not"
-            status_color = (0, 255, 0)  # 绿色
-
+        status_text = "Fall: YES" if is_any_alarm else "Fall: Not"
+        status_color = (0, 0, 255) if is_any_alarm else (0, 255, 0)
         cv2.putText(vis, status_text, (panel_x + 12, panel_y + 38),
                    cv2.FONT_HERSHEY_DUPLEX, 1.2, status_color, 2, cv2.LINE_AA)
-
-        # 显示最高概率
         if result.fall_probs:
             max_prob = max(result.fall_probs.values())
-            prob_text = f"Prob: {max_prob:.3f}"
-            cv2.putText(vis, prob_text, (panel_x + 12, panel_y + 62),
+            cv2.putText(vis, f"Prob: {max_prob:.3f}", (panel_x + 12, panel_y + 62),
                        cv2.FONT_HERSHEY_SIMPLEX, 0.5, (200, 200, 200), 1, cv2.LINE_AA)
 
-        # ── 绘制每个人体（只绘制当前帧 YOLO 实际检测到的） ──
-        for person in result.persons:
-            # 判断这个人体的 track_id
-            # tracker 返回的 dict 中 value 可能有 track_id 属性
-            track_id = getattr(person, 'track_id', -1)
-            if track_id is None or track_id == -1:
-                # 尝试从 fall_probs 的 key 反查
-                if result.fall_probs:
-                    track_id = next(iter(result.fall_probs))
-                else:
-                    continue  # 没有任何 track_id 信息，跳过
+        # ── 只在 YOLO 检测帧画人体框/骨架 ──
+        if result.is_detect_frame and result.raw_detections:
+            from utils.visualization import SKELETON_CONNECTIONS, SKELETON_COLORS
 
-            # 在检测帧中：只绘制 YOLO 实际检测到的人体（非追踪器推演的旧位置）
-            # 在非检测帧中：绘制所有活跃的人体
-            if result.is_detect_frame and result.detected_ids:
-                # 检测帧：只画当前帧实际检测到的
-                if track_id not in result.detected_ids and track_id > 0:
-                    continue
-                # 如果 track_id=-1（新检测但还没分配ID），也画
-                if track_id == -1:
-                    pass  # 新检测，画出来
-            # 非检测帧：全部画（追踪器推演的位置，但保留骨架信息）
+            # 用 YOLO 原始检测结果画框和骨架（不画 tracker 推演的位置）
+            for det in result.raw_detections:
+                color_bgr = (0, 0, 255) if is_any_alarm else (0, 255, 0)
 
-            person_fall = result.alarms.get(track_id, False)
-            has_alarm = person_fall
-            color_bgr = (0, 0, 255) if has_alarm else (0, 255, 0)
+                # 边界框
+                bbox = det.bbox * np.array([w, h, w, h])
+                bbox = bbox.astype(int)
+                cv2.rectangle(vis, (bbox[0], bbox[1]), (bbox[2], bbox[3]), color_bgr, 2)
 
-            # 画边界框
-            bbox = person.bbox * np.array([w, h, w, h])
-            bbox = bbox.astype(int)
-            cv2.rectangle(vis, (bbox[0], bbox[1]), (bbox[2], bbox[3]), color_bgr, 2)
+                # 骨架连线
+                kp_pixel = det.keypoints[:, :2] * np.array([w, h])
+                kp_pixel = kp_pixel.astype(int)
+                kp_conf = det.keypoints[:, 2]
+                for conn_idx, (i, j) in enumerate(SKELETON_CONNECTIONS):
+                    if kp_conf[i] > 0.3 and kp_conf[j] > 0.3:
+                        line_clr = SKELETON_COLORS[conn_idx % len(SKELETON_COLORS)]
+                        cv2.line(vis, tuple(kp_pixel[i]), tuple(kp_pixel[j]),
+                                line_clr, 2, cv2.LINE_AA)
 
-            # ── 画骨架连线 ──
-            kp_pixel = person.keypoints[:, :2] * np.array([w, h])
-            kp_pixel = kp_pixel.astype(int)
-            kp_conf = person.keypoints[:, 2]
+                # 关键点圆点
+                for i in range(17):
+                    if kp_conf[i] > 0.3:
+                        px, py = kp_pixel[i]
+                        cv2.circle(vis, (px, py), 4, (255, 255, 255), -1, cv2.LINE_AA)
+                        cv2.circle(vis, (px, py), 5, color_bgr, 2, cv2.LINE_AA)
 
-            for conn_idx, (i, j) in enumerate(SKELETON_CONNECTIONS):
-                if kp_conf[i] > 0.3 and kp_conf[j] > 0.3:
-                    pt1 = tuple(kp_pixel[i])
-                    pt2 = tuple(kp_pixel[j])
-                    line_clr = SKELETON_COLORS[conn_idx % len(SKELETON_COLORS)]
-                    cv2.line(vis, pt1, pt2, line_clr, 2, cv2.LINE_AA)
-
-            # ── 画关键点圆点 ──
-            for i in range(17):
-                if kp_conf[i] > 0.3:
-                    px, py = kp_pixel[i]
-                    cv2.circle(vis, (px, py), 4, (255, 255, 255), -1, cv2.LINE_AA)
-                    cv2.circle(vis, (px, py), 5, color_bgr, 2, cv2.LINE_AA)
-
-            # 在人体框上方显示概率
-            prob_display = 0.0
-            for track_id, prob in result.fall_probs.items():
-                prob_display = max(prob_display, prob)
-            label = f"{'FALL' if has_alarm else 'Normal'} {prob_display:.2f}"
-            (tw, th), _ = cv2.getTextSize(label, cv2.FONT_HERSHEY_SIMPLEX, 0.55, 2)
-            cv2.rectangle(vis, (bbox[0], bbox[1] - th - 8),
-                         (bbox[0] + tw + 6, bbox[1]), color_bgr, -1)
-            cv2.putText(vis, label, (bbox[0] + 3, bbox[1] - 5),
-                       cv2.FONT_HERSHEY_SIMPLEX, 0.55, (255, 255, 255), 2, cv2.LINE_AA)
+                # 人体框上方显示概率
+                prob_val = max(result.fall_probs.values()) if result.fall_probs else 0.0
+                label = f"{'FALL' if is_any_alarm else 'Normal'} {prob_val:.2f}"
+                (tw, th), _ = cv2.getTextSize(label, cv2.FONT_HERSHEY_SIMPLEX, 0.55, 2)
+                cv2.rectangle(vis, (bbox[0], bbox[1] - th - 8),
+                             (bbox[0] + tw + 6, bbox[1]), color_bgr, -1)
+                cv2.putText(vis, label, (bbox[0] + 3, bbox[1] - 5),
+                           cv2.FONT_HERSHEY_SIMPLEX, 0.55, (255, 255, 255), 2, cv2.LINE_AA)
 
         # ── 右下角：帧号 ──
         frame_text = f"Frame: {result.frame_idx}"

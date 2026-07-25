@@ -39,6 +39,7 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from models.fall_detector import FallDetector, create_fall_detector
 from pipeline.inference import FallDetectionPipeline
 from pipeline.detector import YOLOPoseDetector
+from models.rule_refinement import RuleConfig
 
 
 def process_single_video(pipeline, video_path, output_dir):
@@ -90,7 +91,7 @@ def main():
                        help="模型检查点路径")
     parser.add_argument("--config", type=str, default="configs/config.yaml",
                        help="配置文件路径")
-    parser.add_argument("--version", type=str, default="standard",
+    parser.add_argument("--version", type=str, default="large",
                        choices=["standard", "light", "large",
                                 "transformer-tcn-standard", "transformer-tcn-efficient", "transformer-tcn-light"],
                        help="模型版本")
@@ -98,7 +99,7 @@ def main():
                        help="推理设备 (cpu/cuda)")
 
     # ── 输入/输出目录 ──
-    parser.add_argument("--test_dir", type=str, default="inference_test",
+    parser.add_argument("--test_dir", type=str, default="test",
                        help="批量推理视频目录 (配合 --test 使用)")
     parser.add_argument("--output", type=str, default="outputs",
                        help="结果输出目录")
@@ -167,6 +168,27 @@ def main():
         detector = YOLOPoseDetectorSim()
 
     # ── 创建推理管线 ──
+    # 从 config 加载规则配置
+    rule_cfg = config.get("model", {}).get("rule", {})
+    rule_config = RuleConfig(
+        torso_angle_threshold=rule_cfg.get("torso_angle_threshold", 0.5),
+        torso_angle_duration=rule_cfg.get("torso_angle_duration", 8),
+        velocity_peak_threshold=rule_cfg.get("velocity_peak_threshold", 0.02),
+        stillness_threshold=rule_cfg.get("stillness_threshold", 0.005),
+        stillness_duration=rule_cfg.get("stillness_duration", 15),
+        vote_window=rule_cfg.get("vote_window", 10),
+        vote_threshold=rule_cfg.get("vote_threshold", 0.6),
+        recovery_duration=rule_cfg.get("recovery_duration", 5),
+        tcn_prob_threshold=rule_cfg.get("tcn_prob_threshold", 0.5),
+        aspect_ratio_change_threshold=rule_cfg.get("aspect_ratio_change_threshold", 0.3),
+        fall_memory_frames=rule_cfg.get("fall_memory_frames", 60),
+        rules_min_pass=rule_cfg.get("rules_min_pass", 1),
+    )
+    print(f"[Infer] 规则配置: prob_thresh={rule_config.tcn_prob_threshold}, "
+          f"vote_thresh={rule_config.vote_threshold}, "
+          f"aspect_thresh={rule_config.aspect_ratio_change_threshold}, "
+          f"rules_min_pass={rule_config.rules_min_pass}")
+
     pipeline = FallDetectionPipeline(
         detector=detector,
         fall_detector=fall_detector,
@@ -175,6 +197,7 @@ def main():
         ir_mode=args.ir,
         save_video=True,              # 始终保存视频
         output_dir=args.output,
+        rule_config=rule_config,
     )
 
     stats = pipeline.get_statistics()

@@ -6,7 +6,7 @@
 # --- 模型配置 ---
 model:
   name: "LightSpatialTemporalFallDetector"
-  version: "standard"  # standard / light / large
+  version: "large"  # standard / light / large
   
   # Motion Feature Encoder
   motion_encoder:
@@ -32,16 +32,17 @@ model:
     vote_window: 10
     vote_threshold: 0.6
     recovery_duration: 5
-    tcn_prob_threshold: 0.5
-    aspect_ratio_change_threshold: 0.3
+    tcn_prob_threshold: 0.2        # 从 0.5 降到 0.2（让真实跌倒能通过，后续规则二次过滤）
+    aspect_ratio_change_threshold: 0.2  # 从 0.3 降到 0.2（增强框形态变化敏感度）
     fall_memory_frames: 60
+    rules_min_pass: 1              # 物理规则至少通过1条 (事件合并窗口已修复，不会重复计数)
 
 # --- 检测器配置 ---
 detector:
   model: "yolov8n-pose.pt"   # YOLOv8n-pose 模型路径
   device: "cpu"              # cpu / cuda / npu
   input_size: [640, 384]     # [width, height]
-  conf_threshold: 0.25
+  conf_threshold: 0.15
   iou_threshold: 0.7
   kp_conf_threshold: 0.3
   max_det: 5
