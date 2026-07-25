@@ -190,7 +190,7 @@ def process_video(video_path, label, output_dir, detector, video_id=None, max_fr
     return (len(kps) - 32) // 16 + 1  # 可生成的序列数
 
 
-def download_omnifall(output_dir, detector, max_videos=200):
+def download_omnifall(output_dir, detector, max_videos=500):
     """
     下载 OmniFall 合成视频 (HuggingFace) + 提取关键点
     
@@ -226,7 +226,7 @@ def download_omnifall(output_dir, detector, max_videos=200):
         print(f"[1/4] 标签文件已存在: {labels_path}")
     
     # 读取标签
-    label_map = {}  # video_filename -> (label, action_name)
+    label_map = {}  # video_filename -> is_fall (0/1)
     with open(labels_path, "r") as f:
         reader = csv.DictReader(f)
         for row in reader:
@@ -234,8 +234,15 @@ def download_omnifall(output_dir, detector, max_videos=200):
             label = int(row.get("label", 0))
             if path:
                 fname = os.path.basename(path)
-                # label 0=background/stand, 1=fall, 2=sit etc.
-                is_fall = 1 if label == 1 else 0
+                # OmniFall 16类标签:
+                #   0=background/stand/walk(正常)
+                #   1=fall(正在跌倒) ← 跌倒正样本
+                #   2=fallen(已倒地) ← 跌倒正样本
+                #   3=sit_down(坐下)  4=sitting(已坐下)
+                #   5=lie_down(躺下)  6=lying(躺着)
+                #   7=stand_up(站起)  8=standing(站着)
+                #   9=walking(行走)   10-15=其他
+                is_fall = 1 if label in (1, 2) else 0
                 label_map[fname] = is_fall
     
     print(f"   标签加载: {len(label_map)} 条")
