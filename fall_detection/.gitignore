@@ -17,18 +17,14 @@ env/
 *.swp
 *.swo
 
-# ─── Large dataset (别人自己下载) ───
+# ─── Large dataset ───
 data/train/
 data/val/
 data/test/
 data/raw/
 data/__pycache__/
 
-# ─── Model checkpoints ───
-checkpoints/
-
 # ─── Inference output / test videos ───
-outputs/
 inference_test/
 
 # ─── Model files ───
@@ -42,8 +38,6 @@ yolov8n-pose.pt
 # ─── Large archives (OmniFall 9.72GB) ───
 *.tar
 
-# ─── Evaluation report ───
-eval_report/
 
 # ─── OS ───
 .DS_Store
