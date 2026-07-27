@@ -1,0 +1,9 @@
+{
+  "video": "longtail_env\\sample_2_far.mp4",
+  "total_frames": 410,
+  "total_time": 0.05095815658569336,
+  "fps": 8045.816950040705,
+  "avg_latency_ms": 0.12428818679437403,
+  "fall_events": [],
+  "frame_alarms": []
+}

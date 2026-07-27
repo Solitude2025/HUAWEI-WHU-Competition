@@ -130,6 +130,12 @@ class FallDetectionPipeline:
         conf_threshold: float = 0.25,
         # 红外模式
         ir_mode: bool = False,
+        # 自动低光增强（亮度自适应，正常光照无影响）
+        auto_lowlight: bool = True,
+        # 关键点完整性门控（低于该比例的帧不喂 TCN，防半入境误判）
+        min_kp_completeness: float = 0.5,
+        # 概率时序平滑窗口（对最近 N 帧 TCN 概率取均值，1=不平滑）
+        prob_smooth: int = 3,
         # 报警参数
         alarm_cooldown_frames: int = 30,
         # 输出参数
@@ -147,6 +153,7 @@ class FallDetectionPipeline:
             input_size: 模型输入尺寸
             conf_threshold: 检测置信度阈值
             ir_mode: 是否红外模式
+            auto_lowlight: 是否自动低光增强（默认开，亮帧不触发）
             alarm_cooldown_frames: 报警冷却帧数
             save_video: 是否保存结果视频
             output_dir: 输出目录
@@ -185,6 +192,9 @@ class FallDetectionPipeline:
         self.detection_interval = detection_interval
         self.input_size = input_size
         self.ir_mode = ir_mode
+        self.auto_lowlight = auto_lowlight
+        self.min_kp_completeness = min_kp_completeness
+        self.prob_smooth = max(1, prob_smooth)
         self.alarm_cooldown = alarm_cooldown_frames
         
         # 特征缓冲区（按人体 ID 维护）
@@ -234,6 +244,9 @@ class FallDetectionPipeline:
         # 红外预处理
         if self.ir_mode:
             frame = self.detector.preprocess_for_ir(frame)
+        elif self.auto_lowlight:
+            # 亮度自适应低光增强（亮帧原样返回，无额外开销）
+            frame = self.detector.preprocess_for_lowlight(frame)
         
         # Step 1: YOLO Pose 检测（可能跳过）
         if frame_idx % self.detection_interval == 0:
@@ -254,6 +267,13 @@ class FallDetectionPipeline:
         frame_features = {}
         
         for track_id, detection in tracked.items():
+            # 关键点完整性门控：半入境/严重遮挡时骨架残缺，
+            # 运动特征会畸变（此前实测人入画时 TCN 概率误冲 1.00），
+            # 这类帧不追加进序列缓冲，避免污染 TCN 输入
+            kp_conf = detection.keypoints[:, 2]
+            if float((kp_conf > 0.3).mean()) < self.min_kp_completeness:
+                continue
+
             # 获取或创建规则引擎
             if track_id not in self.rule_engines:
                 self.rule_engines[track_id] = RuleRefinementOnline(
@@ -285,7 +305,7 @@ class FallDetectionPipeline:
                     tcn_prob = self.fall_detector.tcn(feat_tensor)  # (1, T, 1)
                 tcn_prob = tcn_prob.squeeze().numpy()  # (T,)
                 
-                last_prob = float(tcn_prob[-1])
+                last_prob = float(tcn_prob[-self.prob_smooth:].mean())  # 时序平滑：抑制单帧概率抖动
                 last_feat = motion_feat[-1]
                 
                 # Rule Refinement 在线处理
@@ -412,7 +432,7 @@ class FallDetectionPipeline:
         
         result = PipelineResult(
             frame_results=frame_results,
-            fall_events=self._fall_events,
+            fall_events=list(self._fall_events),  # 拷贝快照，避免下次 reset 清空
             total_frames=total_frames,
             total_time=total_time,
             fps=avg_fps,

@@ -1,0 +1,9 @@
+{
+  "video": "longtail_env\\sample_1_blur.mp4",
+  "total_frames": 399,
+  "total_time": 0.055762529373168945,
+  "fps": 7155.34256579088,
+  "avg_latency_ms": 0.13975571271470913,
+  "fall_events": [],
+  "frame_alarms": []
+}

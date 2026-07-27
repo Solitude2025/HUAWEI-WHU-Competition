@@ -173,8 +173,12 @@ def main():
         print(f"[Error] 检查点不存在: {args.checkpoint}")
         return
     
-    checkpoint = torch.load(args.checkpoint, map_location="cpu")
-    model.load_state_dict(checkpoint["model_state_dict"])
+    checkpoint = torch.load(args.checkpoint, map_location="cpu", weights_only=False)
+    # 过滤掉 thop profile 注入的 total_ops/total_params 键（旧检查点可能包含）
+    state_dict = {k: v for k, v in checkpoint["model_state_dict"].items()
+                  if not k.endswith(".total_ops") and not k.endswith(".total_params")
+                  and k not in ("total_ops", "total_params")}
+    model.load_state_dict(state_dict)
     print(f"[Export] 加载检查点: epoch={checkpoint['epoch']}")
     
     model.eval()

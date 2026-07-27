@@ -1,0 +1,120 @@
+{
+  "video": "eval_report/longtail/videos/lowlight/fall-05-cam0.mp4",
+  "total_frames": 151,
+  "total_time": 1.8600811958312988,
+  "fps": 81.17925192642775,
+  "avg_latency_ms": 12.318418515439065,
+  "fall_events": [
+    {
+      "person_id": -1,
+      "start_frame": 134,
+      "end_frame": 150,
+      "max_probability": 0.4553137695789337,
+      "duration_frames": 16,
+      "timestamp": 4.466666666666667
+    }
+  ],
+  "frame_alarms": [
+    {
+      "frame": 134,
+      "alarms": {
+        "0": false,
+        "1": true
+      },
+      "probs": {
+        "0": 0.5162263941764831,
+        "1": 0.34300586938858035
+      }
+    },
+    {
+      "frame": 141,
+      "alarms": {
+        "0": true
+      },
+      "probs": {
+        "0": 0.4553137695789337
+      }
+    },
+    {
+      "frame": 142,
+      "alarms": {
+        "0": true
+      },
+      "probs": {
+        "0": 0.4547831571102143
+      }
+    },
+    {
+      "frame": 143,
+      "alarms": {
+        "0": true
+      },
+      "probs": {
+        "0": 0.4542111492156983
+      }
+    },
+    {
+      "frame": 144,
+      "alarms": {
+        "0": true
+      },
+      "probs": {
+        "0": 0.45362721443176274
+      }
+    },
+    {
+      "frame": 145,
+      "alarms": {
+        "0": true
+      },
+      "probs": {
+        "0": 0.4530078029632569
+      }
+    },
+    {
+      "frame": 146,
+      "alarms": {
+        "0": true
+      },
+      "probs": {
+        "0": 0.45327630996704105
+      }
+    },
+    {
+      "frame": 147,
+      "alarms": {
+        "0": true
+      },
+      "probs": {
+        "0": 0.45356598854064945
+      }
+    },
+    {
+      "frame": 148,
+      "alarms": {
+        "0": true
+      },
+      "probs": {
+        "0": 0.4533342456817627
+      }
+    },
+    {
+      "frame": 149,
+      "alarms": {
+        "0": true
+      },
+      "probs": {
+        "0": 0.4530572807788849
+      }
+    },
+    {
+      "frame": 150,
+      "alarms": {
+        "0": true
+      },
+      "probs": {
+        "0": 0.45308471083641055
+      }
+    }
+  ]
+}

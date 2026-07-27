@@ -1,0 +1,139 @@
+{
+  "scenarios": [
+    "original",
+    "lowlight",
+    "lowlight_noenh",
+    "ir_style",
+    "occluded"
+  ],
+  "videos": {
+    "adl-01-cam0": {
+      "original": {
+        "events": 0,
+        "max_prob": 0.0,
+        "frames": 150,
+        "avg_latency_ms": 24.8
+      },
+      "lowlight": {
+        "events": 0,
+        "max_prob": 0.0,
+        "frames": 150,
+        "avg_latency_ms": 27.3
+      },
+      "lowlight_noenh": {
+        "events": 0,
+        "max_prob": 0.0,
+        "frames": 150,
+        "avg_latency_ms": 24.9
+      },
+      "ir_style": {
+        "events": 0,
+        "max_prob": 0.0,
+        "frames": 150,
+        "avg_latency_ms": 19.6
+      },
+      "occluded": {
+        "events": 0,
+        "max_prob": 0.0,
+        "frames": 150,
+        "avg_latency_ms": 25.6
+      }
+    },
+    "adl-10-cam0": {
+      "original": {
+        "events": 0,
+        "max_prob": 0.0,
+        "frames": 300,
+        "avg_latency_ms": 12.0
+      },
+      "lowlight": {
+        "events": 0,
+        "max_prob": 0.0,
+        "frames": 300,
+        "avg_latency_ms": 16.5
+      },
+      "lowlight_noenh": {
+        "events": 0,
+        "max_prob": 0.0,
+        "frames": 300,
+        "avg_latency_ms": 13.3
+      },
+      "ir_style": {
+        "events": 0,
+        "max_prob": 0.0,
+        "frames": 300,
+        "avg_latency_ms": 14.4
+      },
+      "occluded": {
+        "events": 0,
+        "max_prob": 0.0,
+        "frames": 300,
+        "avg_latency_ms": 10.8
+      }
+    },
+    "fall-01-cam0": {
+      "original": {
+        "events": 1,
+        "max_prob": 0.4644,
+        "frames": 160,
+        "avg_latency_ms": 13.2
+      },
+      "lowlight": {
+        "events": 1,
+        "max_prob": 0.4489,
+        "frames": 160,
+        "avg_latency_ms": 17.0
+      },
+      "lowlight_noenh": {
+        "events": 1,
+        "max_prob": 0.4659,
+        "frames": 160,
+        "avg_latency_ms": 12.1
+      },
+      "ir_style": {
+        "events": 0,
+        "max_prob": 0.0,
+        "frames": 160,
+        "avg_latency_ms": 18.4
+      },
+      "occluded": {
+        "events": 1,
+        "max_prob": 0.4624,
+        "frames": 160,
+        "avg_latency_ms": 13.7
+      }
+    },
+    "fall-05-cam0": {
+      "original": {
+        "events": 1,
+        "max_prob": 0.493,
+        "frames": 151,
+        "avg_latency_ms": 13.4
+      },
+      "lowlight": {
+        "events": 1,
+        "max_prob": 0.4575,
+        "frames": 151,
+        "avg_latency_ms": 16.1
+      },
+      "lowlight_noenh": {
+        "events": 1,
+        "max_prob": 0.4553,
+        "frames": 151,
+        "avg_latency_ms": 12.3
+      },
+      "ir_style": {
+        "events": 0,
+        "max_prob": 0.0,
+        "frames": 151,
+        "avg_latency_ms": 17.9
+      },
+      "occluded": {
+        "events": 1,
+        "max_prob": 0.409,
+        "frames": 151,
+        "avg_latency_ms": 13.1
+      }
+    }
+  }
+}

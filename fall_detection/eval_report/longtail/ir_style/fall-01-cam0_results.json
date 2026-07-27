@@ -1,0 +1,9 @@
+{
+  "video": "eval_report/longtail/videos/ir_style/fall-01-cam0.mp4",
+  "total_frames": 160,
+  "total_time": 2.9458868503570557,
+  "fps": 54.31301612300799,
+  "avg_latency_ms": 18.411792814731598,
+  "fall_events": [],
+  "frame_alarms": []
+}

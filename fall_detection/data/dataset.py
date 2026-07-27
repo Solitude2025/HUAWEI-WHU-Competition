@@ -129,7 +129,53 @@ class FallDetectionDataset(Dataset):
                     sequences.append((person_dir, start, fall_ratio))
         
         print(f"[Dataset] 加载 {len(sequences)} 个序列")
+        
+        # 难负样本加权：计算每个负样本序列的躯干角变化幅度，
+        # 坐下/躺下等易混负样本的变化大，训练时提高其采样权重
+        if self.mode == "train":
+            self._neg_weights = self._compute_hard_negative_weights(
+                sequences, self.sequence_length
+            )
+        
         return sequences
+    
+    @staticmethod
+    def _compute_hard_negative_weights(sequences, sequence_length: int, alpha: float = 3.0) -> List[float]:
+        """
+        为负样本序列计算采样权重：weight = 1 + alpha * norm(score)
+        score = 窗口内躯干角最大逐帧变化（坐下/躺下等易混动作得分高）
+        躯干角 = 肩中心-髋中心连线与垂直方向夹角
+        """
+        # 先按 person_dir 聚合，躯干角每个视频只算一次
+        video_angles: Dict[str, np.ndarray] = {}
+        scores = np.zeros(len(sequences), dtype=np.float32)
+        for i, (person_dir, start, fall_ratio) in enumerate(sequences):
+            if fall_ratio > 0.5:
+                continue  # 正样本不加权
+            if person_dir not in video_angles:
+                kp_path = os.path.join(person_dir, "keypoints.npy")
+                if not os.path.exists(kp_path):
+                    video_angles[person_dir] = np.zeros(0)
+                    continue
+                kp = np.load(kp_path)  # (T, 17, 3)
+                shoulder = (kp[:, 5, :2] + kp[:, 6, :2]) / 2
+                hip = (kp[:, 11, :2] + kp[:, 12, :2]) / 2
+                vec = shoulder - hip
+                video_angles[person_dir] = np.arctan2(
+                    np.abs(vec[:, 0]), np.abs(vec[:, 1]) + 1e-6
+                )
+            ang = video_angles[person_dir]
+            end = min(start + 1 + sequence_length, len(ang))
+            if end - start > 1:
+                scores[i] = np.abs(np.diff(ang[start:end])).max()
+        
+        # 归一化到 [0, 1] 后加权
+        if scores.max() > 0:
+            norm = scores / scores.max()
+        else:
+            norm = scores
+        weights = (1.0 + alpha * norm).tolist()
+        return weights
     
     def _generate_synthetic_sequences(self) -> List:
         """生成合成数据用于演示"""
@@ -239,9 +285,13 @@ class FallDetectionDataset(Dataset):
                 else:
                     person_dir, start, _ = self.sequences[index]
             else:
-                # 采样正常样本
+                # 采样正常样本（难负样本按躯干角变化加权，坐下/躺下被采概率更高）
                 if self.normal_indices:
-                    idx = random.choice(self.normal_indices)
+                    if getattr(self, "_neg_weights", None):
+                        w = [self._neg_weights[i] for i in self.normal_indices]
+                        idx = random.choices(self.normal_indices, weights=w, k=1)[0]
+                    else:
+                        idx = random.choice(self.normal_indices)
                     person_dir, start, _ = self.sequences[idx]
                 else:
                     person_dir, start, _ = self.sequences[index]
@@ -258,9 +308,11 @@ class FallDetectionDataset(Dataset):
             bb = np.pad(bb, ((0, pad_len), (0, 0)), mode='edge')
             lbl = np.pad(lbl, (0, pad_len), mode='edge')
         
-        # 数据增强
+        # 数据增强（截断增强仅用于负样本，避免把跌倒序列截成"不像跌倒"）
         if self.use_augmentation:
-            kp = self.augment.augment_keypoints(kp)
+            kp = self.augment.augment_keypoints(
+                kp, allow_truncation=(lbl.sum() == 0)
+            )
         
         return {
             "keypoints": torch.from_numpy(kp).float(),

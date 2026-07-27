@@ -26,13 +26,13 @@ model:
   rule:
     torso_angle_threshold: 0.5       # 弧度 ≈ 30°
     torso_angle_duration: 8
-    velocity_peak_threshold: 0.02
+    velocity_peak_threshold: 0.03   # 跟踪器修复后重新标定：跌倒 0.09-0.16，慢速远距跌倒 0.032，缓慢坐地尖峰 0.028
     stillness_threshold: 0.005
     stillness_duration: 15
     vote_window: 10
     vote_threshold: 0.6
     recovery_duration: 5
-    tcn_prob_threshold: 0.2        # 从 0.5 降到 0.2（让真实跌倒能通过，后续规则二次过滤）
+    tcn_prob_threshold: 0.3        # 2000视频重训后类间分离改善：ADL max 0.29-0.30、fall-05 0.49，0.3 阈值下 4/4 全对
     aspect_ratio_change_threshold: 0.2  # 从 0.3 降到 0.2（增强框形态变化敏感度）
     fall_memory_frames: 60
     rules_min_pass: 1              # 物理规则至少通过1条 (事件合并窗口已修复，不会重复计数)

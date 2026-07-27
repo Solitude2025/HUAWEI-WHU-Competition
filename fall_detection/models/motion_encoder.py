@@ -16,6 +16,9 @@ Motion Feature Encoder (运动特征编码器)
 4. 关键点速度：头部/肩部/臀部/膝部各自的 Δx, Δy
 5. 人体面积变化：跌倒后人体框变宽
 6. 重心变化：所有关键点均值位置的速度
+7. 手部支撑特征：手腕速度、手腕贴地度、支撑状态分
+   （FOOSH 生物力学先验：保护性跌倒中手先于身体落地并保持支撑，
+   作为软特征供 TCN 学习时序先后关系，不作为硬规则）
 """
 
 import torch
@@ -257,6 +260,40 @@ class MotionFeatureEncoder(nn.Module):
         torso_angle_change = torch.cat([torso_angle_change[:, :1], torso_angle_change], dim=1)
         features_list.append(torso_angle_change.unsqueeze(-1))  # (B, T, 1)
         
+        # ---- 10. 手部支撑特征 (6维，利用原 padding 空位) ----
+        # 生物力学依据：保护性跌倒（FOOSH）中手通常先于身体落地，
+        # 且落地后保持支撑状态。作为软特征供 TCN 学习时序先后关系，
+        # 而非硬规则（晕厥/侧倒无撑手动作，硬规则会漏报最危险场景）。
+        lw = keypoints[:, :, KP["left_wrist"]]    # (B, T, 3)
+        rw = keypoints[:, :, KP["right_wrist"]]
+        
+        # 10a. 手腕速度 (2点 × 2维 = 4维)：手先落地 → 手腕速度峰值早于髋部
+        wrist_vels = []
+        for w in (lw, rw):
+            dvx = w[:, 1:, 0] - w[:, :-1, 0]
+            dvy = w[:, 1:, 1] - w[:, :-1, 1]
+            dvx = torch.cat([dvx[:, :1], dvx], dim=1)
+            dvy = torch.cat([dvy[:, :1], dvy], dim=1)
+            wrist_vels.append(dvx.unsqueeze(-1))
+            wrist_vels.append(dvy.unsqueeze(-1))
+        features_list.append(torch.cat(wrist_vels, dim=-1))  # (B, T, 4)
+        
+        # 10b. 手腕贴地度 (1维)：距 bbox 底边的相对位置（取左右手最大值），
+        # 1 = 贴在 bbox 底边（撑地/躺地），置信度低时衰减到 0
+        bbox_y2 = bboxes[..., 3].unsqueeze(-1)  # (B, T, 1)
+        bbox_hh = bbox_h.unsqueeze(-1)
+        lw_low = (1.0 - (bbox_y2 - lw[..., 1:2]) / (bbox_hh + 1e-6)) * lw[..., 2:3]
+        rw_low = (1.0 - (bbox_y2 - rw[..., 1:2]) / (bbox_hh + 1e-6)) * rw[..., 2:3]
+        wrist_low = torch.maximum(lw_low, rw_low)  # (B, T, 1)
+        features_list.append(wrist_low)
+        
+        # 10c. 支撑状态分 (1维)：贴地 × 手腕静止 = 保持支撑
+        wrist_speed = torch.sqrt(
+            wrist_vels[1].squeeze(-1)**2 + wrist_vels[3].squeeze(-1)**2 + 1e-6
+        )  # 两手腕 vy 合成近似
+        support_score = wrist_low.squeeze(-1) * torch.exp(-wrist_speed / 0.01)
+        features_list.append(support_score.unsqueeze(-1))  # (B, T, 1)
+        
         # 剩余维度用零填充或扩展
         current_dim = sum(f.shape[-1] for f in features_list)
         if current_dim < self.feature_dim:
@@ -339,6 +376,11 @@ class MotionFeatureEncoder(nn.Module):
             "bbox_w_change", "bbox_h_change",
             "center_speed", "center_acc",
             "torso_angle_change",
+            # 手部支撑特征（FOOSH：手先落地 + 保持支撑）
+            "left_wrist_vx", "left_wrist_vy",
+            "right_wrist_vx", "right_wrist_vy",
+            "wrist_low",
+            "support_score",
         ])
         # 补齐到 feature_dim
         while len(names) < self.feature_dim:

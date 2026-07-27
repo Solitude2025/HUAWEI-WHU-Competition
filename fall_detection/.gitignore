@@ -26,14 +26,24 @@ data/__pycache__/
 
 # ─── Inference output / test videos ───
 inference_test/
+outputs/
+eval_report/longtail/videos/
 
 # ─── Model files ───
 *.pt
 *.pth
 *.onnx
+*.onnx.data
 *.om
 *.mindir
 yolov8n-pose.pt
+
+# ─── Videos ───
+*.mp4
+*.avi
+*.mov
+*.mkv
+*.webm
 
 # ─── Large archives (OmniFall 9.72GB) ───
 *.tar
@@ -48,3 +58,4 @@ Thumbs.db
 
 # ─── Logs ───
 *.log
+*.bundle

@@ -1,0 +1,172 @@
+{
+  "video": "eval_report/longtail/videos/lowlight/fall-05-cam0.mp4",
+  "total_frames": 151,
+  "total_time": 2.434180498123169,
+  "fps": 62.033197668137525,
+  "avg_latency_ms": 16.12040064982231,
+  "fall_events": [
+    {
+      "person_id": 0,
+      "start_frame": 134,
+      "end_frame": 150,
+      "max_probability": 0.45752458930015566,
+      "duration_frames": 16,
+      "timestamp": 4.466666666666667
+    }
+  ],
+  "frame_alarms": [
+    {
+      "frame": 134,
+      "alarms": {
+        "0": true
+      },
+      "probs": {
+        "0": 0.4347611260414123
+      }
+    },
+    {
+      "frame": 135,
+      "alarms": {
+        "0": true
+      },
+      "probs": {
+        "0": 0.3234429001808166
+      }
+    },
+    {
+      "frame": 136,
+      "alarms": {
+        "0": true
+      },
+      "probs": {
+        "0": 0.384469735622406
+      }
+    },
+    {
+      "frame": 137,
+      "alarms": {
+        "0": true
+      },
+      "probs": {
+        "0": 0.3288324236869812
+      }
+    },
+    {
+      "frame": 138,
+      "alarms": {
+        "0": true
+      },
+      "probs": {
+        "0": 0.3561118125915527
+      }
+    },
+    {
+      "frame": 139,
+      "alarms": {
+        "0": true
+      },
+      "probs": {
+        "0": 0.31161736249923705
+      }
+    },
+    {
+      "frame": 140,
+      "alarms": {
+        "0": true
+      },
+      "probs": {
+        "0": 0.3147927403450012
+      }
+    },
+    {
+      "frame": 141,
+      "alarms": {
+        "0": true
+      },
+      "probs": {
+        "0": 0.29832252860069275
+      }
+    },
+    {
+      "frame": 142,
+      "alarms": {
+        "0": true
+      },
+      "probs": {
+        "0": 0.2977490365505218
+      }
+    },
+    {
+      "frame": 143,
+      "alarms": {
+        "0": true
+      },
+      "probs": {
+        "0": 0.45752458930015566
+      }
+    },
+    {
+      "frame": 144,
+      "alarms": {
+        "0": true
+      },
+      "probs": {
+        "0": 0.45731609225273134
+      }
+    },
+    {
+      "frame": 145,
+      "alarms": {
+        "0": true
+      },
+      "probs": {
+        "0": 0.45708991050720216
+      }
+    },
+    {
+      "frame": 146,
+      "alarms": {
+        "0": true
+      },
+      "probs": {
+        "0": 0.45719693064689637
+      }
+    },
+    {
+      "frame": 147,
+      "alarms": {
+        "0": true
+      },
+      "probs": {
+        "0": 0.45728944897651674
+      }
+    },
+    {
+      "frame": 148,
+      "alarms": {
+        "0": true
+      },
+      "probs": {
+        "0": 0.4571166789531708
+      }
+    },
+    {
+      "frame": 149,
+      "alarms": {
+        "0": true
+      },
+      "probs": {
+        "0": 0.45692406058311463
+      }
+    },
+    {
+      "frame": 150,
+      "alarms": {
+        "0": true
+      },
+      "probs": {
+        "0": 0.45705634713172916
+      }
+    }
+  ]
+}

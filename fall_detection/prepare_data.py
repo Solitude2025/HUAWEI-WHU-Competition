@@ -192,6 +192,57 @@ def download_omnifall(omnifall_dir: str):
 #  视频 → 关键点提取 + 帧级标签修复
 # ═══════════════════════════════════════════════
 
+def _iter_frames(video_path: str):
+    """
+    逐帧生成视频帧。优先用 cv2；若解码失败（如 AV1 编码，
+    OpenCV 只能读元数据不能解码），回退到 imageio-ffmpeg 的
+    ffmpeg 二进制走 rawvideo 管道解码。
+    """
+    import cv2
+
+    cap = cv2.VideoCapture(video_path)
+    if not cap.isOpened():
+        return
+    fps = cap.get(cv2.CAP_PROP_FPS)
+    w = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
+    h = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
+
+    ok, frame = cap.read()
+    if ok:
+        yield frame
+        while True:
+            ok, frame = cap.read()
+            if not ok:
+                break
+            yield frame
+        cap.release()
+        return
+    cap.release()
+
+    # ---- cv2 解码失败，回退 ffmpeg 管道 ----
+    if w <= 0 or h <= 0:
+        print(f"  [!] 无法获取分辨率: {video_path}")
+        return
+    import imageio_ffmpeg
+    cmd = [
+        imageio_ffmpeg.get_ffmpeg_exe(),
+        "-hide_banner", "-loglevel", "error",
+        "-i", video_path,
+        "-f", "rawvideo", "-pix_fmt", "bgr24", "pipe:1",
+    ]
+    frame_size = w * h * 3
+    proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL)
+    try:
+        while True:
+            buf = proc.stdout.read(frame_size)
+            if len(buf) < frame_size:
+                break
+            yield np.frombuffer(buf, dtype=np.uint8).reshape(h, w, 3)
+    finally:
+        proc.stdout.close()
+        proc.wait()
+
+
 def process_video_with_segments(
     video_path: str,
     segments_df: "pd.DataFrame",
@@ -209,22 +260,22 @@ def process_video_with_segments(
     import cv2
     import pandas as pd
 
+    # cv2 只用于读取元数据（fps），即使无法解码 AV1 也能拿到
     cap = cv2.VideoCapture(video_path)
     if not cap.isOpened():
         print(f"  [!] 无法打开: {video_path}")
         return 0
-
     fps = cap.get(cv2.CAP_PROP_FPS)
+    cap.release()
     if fps <= 0:
         fps = 30.0
-    total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
 
     # 对当前视频的所有片段按 start 排序
     video_segments = segments_df.sort_values("start")
 
     all_kps, all_bbs, all_labels = [], [], []
 
-    for frame_idx in range(total_frames):
+    for frame_idx, frame in enumerate(_iter_frames(video_path)):
         frame_time = frame_idx / fps
 
         # 找到当前帧属于哪个片段
@@ -236,11 +287,6 @@ def process_video_with_segments(
                 frame_label = 1 if raw_label in (1, 2) else 0
                 break
 
-        ret, frame = cap.read()
-        if not ret:
-            break
-
-        h, w = frame.shape[:2]
         dets = detector.detect(frame)
         if dets:
             best = max(dets, key=lambda d: d.confidence)
@@ -253,8 +299,6 @@ def process_video_with_segments(
         all_kps.append(kp)
         all_bbs.append(bb)
         all_labels.append(frame_label)
-
-    cap.release()
 
     if len(all_kps) == 0:
         return 0
@@ -297,38 +341,76 @@ def extract_keypoints(omnifall_dir: str, detector, max_videos: int = 500):
     df = pd.read_csv(csv_path)
     print(f"[1/4] 读取标签文件: {len(df):,} 行, {df['path'].nunique():,} 个视频")
 
-    # ---- 2. 解压视频 ----
+    # ---- 2. 按类别分层抽样视频（保证跌倒比例 + 多视角覆盖）----
+    # tar 内按类别目录字典序排列，直接取前 N 个会全是 fall 类，
+    # 因此按一级目录（动作类别）配额抽样；随机抽样自然覆盖
+    # camera_elevation / camera_azimuth / camera_distance 等视角维度。
+    target = max_videos if max_videos > 0 else df["path"].nunique()
+    df["_cls"] = df["path"].str.split("/").str[0]
+    classes = sorted(df["_cls"].unique())
+    quota = {"fall": max(1, target * 24 // 100),      # 跌倒类 24%
+             "fallen": max(1, target * 16 // 100)}    # 倒地类 16%
+    other_classes = [c for c in classes if c not in quota]
+    per_other = max(1, (target - sum(quota.values())) // max(1, len(other_classes)))
+
+    rng = np.random.RandomState(42)
+    selected = []
+    for cls in classes:
+        pool = sorted(df.loc[df["_cls"] == cls, "path"].unique())
+        pool = list(pool)
+        rng.shuffle(pool)
+        q = quota.get(cls, per_other)
+        selected.extend(pool[:q])
+    # 配额取整可能不足 target，从剩余池补齐
+    if len(selected) < target:
+        rest = sorted(set(df["path"].unique()) - set(selected))
+        rng.shuffle(rest)
+        selected.extend(rest[: target - len(selected)])
+    selected = selected[:target]
+    selected_set = set(selected)
+
+    sel_df = df[df["path"].isin(selected_set)]
+    n_fall_videos = sel_df[sel_df["label"].isin([1, 2])]["path"].nunique()
+    print(f"[2/4] 分层抽样 {len(selected)} 个视频 (含跌倒 {n_fall_videos} 个):")
+    print("   类别分布:", dict(sel_df.groupby("_cls")["path"].nunique()))
+    cam_view = sel_df.drop_duplicates("path")
+    print("   俯仰角:", dict(cam_view["camera_elevation"].value_counts()),
+          "| 方位角:", dict(cam_view["camera_azimuth"].value_counts()))
+
+    # ---- 3. 解压选中的视频 ----
     video_dir = os.path.join(omnifall_dir, "videos")
     os.makedirs(video_dir, exist_ok=True)
 
-    # 检查是否已有解压的视频
-    existing_mp4 = []
+    # 检查已解压的视频覆盖了选中集的多少
+    existing_stems = set()
     for root, _, files in os.walk(video_dir):
         for f in files:
             if f.endswith(".mp4"):
-                existing_mp4.append(os.path.join(root, f))
+                rel = os.path.relpath(os.path.join(root, f), video_dir)
+                existing_stems.add(os.path.splitext(rel)[0].replace("\\", "/"))
 
-    if len(existing_mp4) < max_videos:
-        if existing_mp4:
-            print(f"[2/4] 已有 {len(existing_mp4)} 个视频，但需要 {max_videos} 个，重新解压...")
-            shutil.rmtree(video_dir)
-            os.makedirs(video_dir)
-
-        print(f"[2/4] 解压视频 ({'全部' if max_videos < 0 else f'前 {max_videos} 个'})...")
+    missing = [p for p in selected if p not in existing_stems]
+    if missing:
+        print(f"[3/4] 解压 {len(missing)} 个选中视频 (已有 {len(selected) - len(missing)} 个)...")
+        wanted = {f"{p}.mp4" for p in missing}
         with tarfile.open(tar_path, "r") as tar:
-            members = tar.getmembers()
-            video_members = [m for m in members if m.name.endswith(".mp4")]
-            target = min(max_videos, len(video_members)) if max_videos > 0 else len(video_members)
-            print(f"   存档共 {len(video_members)} 个视频")
-            for i, m in enumerate(video_members[:target]):
-                tar.extract(m, path=video_dir)
-                if (i + 1) % 500 == 0:
-                    print(f"   已解压 {i+1}/{target}")
+            n_done = 0
+            for m in tar:
+                if not m.name.endswith(".mp4"):
+                    continue
+                name = m.name[2:] if m.name.startswith("./") else m.name
+                if name in wanted:
+                    tar.extract(m, path=video_dir)
+                    n_done += 1
+                    if n_done % 50 == 0:
+                        print(f"   已解压 {n_done}/{len(missing)}")
+                    if n_done >= len(missing):
+                        break
         print(f"   解压完成 -> {video_dir}")
     else:
-        print(f"[2/4] 视频已存在: {len(existing_mp4)} 个")
+        print(f"[3/4] 视频已就位: {len(existing_stems & selected_set)} 个")
 
-    # ---- 3. 扫描所有视频 ----
+    # ---- 4. 扫描选中的视频 ----
     video_files = []
     for root, _, files in os.walk(video_dir):
         for f in files:
@@ -336,7 +418,8 @@ def extract_keypoints(omnifall_dir: str, detector, max_videos: int = 500):
                 # relative_path 如 "fall/fall_ch_001"
                 rel = os.path.relpath(os.path.join(root, f), video_dir)
                 path_stem = os.path.splitext(rel)[0].replace("\\", "/")
-                video_files.append((os.path.join(root, f), path_stem))
+                if path_stem in selected_set:
+                    video_files.append((os.path.join(root, f), path_stem))
 
     # ---- 4. 提取关键点 ----
     kp_dir = os.path.join(omnifall_dir, "extracted_keypoints")
@@ -347,11 +430,11 @@ def extract_keypoints(omnifall_dir: str, detector, max_videos: int = 500):
 
     # 按 path 将 CSV 分组（每个视频可能有多个片段）
     grouped = df.groupby("path")
-    target = min(max_videos, len(video_files)) if max_videos > 0 else len(video_files)
+    target = len(video_files)
 
-    print(f"[3/4] 提取关键点 ({target} 个视频)...")
+    print(f"[4/4] 提取关键点 ({target} 个视频)...")
 
-    for i, (vp, path_stem) in enumerate(video_files[:target]):
+    for i, (vp, path_stem) in enumerate(video_files):
         # 获取这个视频的所有片段
         if path_stem in grouped.groups:
             segments = grouped.get_group(path_stem)

@@ -1,0 +1,9 @@
+{
+  "video": "longtail_env\\sample_1_infrared.mp4",
+  "total_frames": 399,
+  "total_time": 0.06598043441772461,
+  "fps": 6047.247241112661,
+  "avg_latency_ms": 0.16536449728753033,
+  "fall_events": [],
+  "frame_alarms": []
+}

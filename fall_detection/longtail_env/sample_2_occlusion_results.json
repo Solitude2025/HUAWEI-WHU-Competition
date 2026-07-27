@@ -1,0 +1,9 @@
+{
+  "video": "longtail_env\\sample_2_occlusion.mp4",
+  "total_frames": 410,
+  "total_time": 0.059362173080444336,
+  "fps": 6906.755240317612,
+  "avg_latency_ms": 0.14478578800108374,
+  "fall_events": [],
+  "frame_alarms": []
+}

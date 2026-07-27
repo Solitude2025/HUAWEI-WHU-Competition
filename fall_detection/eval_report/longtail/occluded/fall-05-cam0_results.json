@@ -1,0 +1,41 @@
+{
+  "video": "eval_report/longtail/videos/occluded/fall-05-cam0.mp4",
+  "total_frames": 151,
+  "total_time": 1.9733660221099854,
+  "fps": 76.51900271321487,
+  "avg_latency_ms": 13.06864915304626,
+  "fall_events": [
+    {
+      "person_id": 0,
+      "start_frame": 134,
+      "end_frame": 135,
+      "max_probability": 0.4090370428562164,
+      "duration_frames": 1,
+      "timestamp": 4.466666666666667
+    }
+  ],
+  "frame_alarms": [
+    {
+      "frame": 134,
+      "alarms": {
+        "0": true,
+        "1": false
+      },
+      "probs": {
+        "0": 0.4090370428562164,
+        "1": 0.009781344793736935
+      }
+    },
+    {
+      "frame": 135,
+      "alarms": {
+        "0": true,
+        "1": false
+      },
+      "probs": {
+        "0": 0.3257692694664001,
+        "1": 0.009865266270935535
+      }
+    }
+  ]
+}

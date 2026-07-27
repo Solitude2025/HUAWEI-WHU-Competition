@@ -1,0 +1,9 @@
+{
+  "video": "test/adl-01-cam0.mp4",
+  "total_frames": 150,
+  "total_time": 3.715958833694458,
+  "fps": 40.36643211433748,
+  "avg_latency_ms": 24.773058891296387,
+  "fall_events": [],
+  "frame_alarms": []
+}

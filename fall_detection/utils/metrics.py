@@ -220,13 +220,22 @@ def compute_model_efficiency(
     model_size_mb = total_params * 4 / (1024 * 1024)
     
     # 计算 FLOPs (需要 fvcore/thop)
+    # 注意: input_shape 对应 TCN 输入，应 profile model.tcn 而非整个 FallDetector
+    # （FallDetector.forward 需要 keypoints+bboxes 两个输入）
     try:
         from thop import profile
+        target = getattr(model, "tcn", model)
         dummy = torch.randn(*input_shape)
-        flops, _ = profile(model, inputs=(dummy,), verbose=False)
+        flops, _ = profile(target, inputs=(dummy,), verbose=False)
         flops_m = flops / 1e6
     except:
         flops_m = 0
+    finally:
+        # 清理 thop 注入的 total_ops/total_params 缓冲区，避免污染 state_dict
+        for m in model.modules():
+            for k in ("total_ops", "total_params"):
+                if k in m._buffers:
+                    del m._buffers[k]
     
     return {
         "total_params": total_params,

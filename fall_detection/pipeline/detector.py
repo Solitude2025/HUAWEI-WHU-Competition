@@ -264,6 +264,47 @@ class YOLOPoseDetector:
         
         return ir_image
 
+    def preprocess_for_lowlight(
+        self,
+        frame: np.ndarray,
+        dark_threshold: float = 60.0,
+    ) -> np.ndarray:
+        """
+        低光场景自适应预处理（傍晚微光、逆光等）
+
+        先计算帧平均亮度，仅当亮度低于阈值时执行增强
+        （gamma 提亮 + CLAHE），正常光照帧原样返回，
+        避免引入额外计算与画质损失。
+
+        Args:
+            frame: (H, W, 3) BGR/RGB uint8 图像
+            dark_threshold: 平均亮度阈值（0-255），低于则判定为低光
+
+        Returns:
+            (H, W, 3) 增强后（或原样）的三通道图像
+        """
+        import cv2
+
+        gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY) \
+            if frame.ndim == 3 else frame
+        if float(gray.mean()) >= dark_threshold:
+            return frame
+
+        # gamma 提亮暗区
+        gamma = 0.6
+        table = (np.arange(256) / 255.0) ** gamma * 255.0
+        table = np.clip(table, 0, 255).astype(np.uint8)
+        enhanced = cv2.LUT(frame, table)
+
+        # CLAHE 局部对比度增强
+        lab = cv2.cvtColor(enhanced, cv2.COLOR_BGR2LAB)
+        l, a, b = cv2.split(lab)
+        clahe = cv2.createCLAHE(clipLimit=2.0, tileGridSize=(8, 8))
+        l = clahe.apply(l)
+        enhanced = cv2.cvtColor(cv2.merge([l, a, b]), cv2.COLOR_LAB2BGR)
+
+        return enhanced
+
 
 class YOLOPoseDetectorSim:
     """

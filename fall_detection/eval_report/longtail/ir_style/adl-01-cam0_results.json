@@ -1,0 +1,9 @@
+{
+  "video": "eval_report/longtail/videos/ir_style/adl-01-cam0.mp4",
+  "total_frames": 150,
+  "total_time": 2.9367153644561768,
+  "fps": 51.07747308965951,
+  "avg_latency_ms": 19.578102429707847,
+  "fall_events": [],
+  "frame_alarms": []
+}

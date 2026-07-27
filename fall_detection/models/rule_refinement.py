@@ -36,7 +36,8 @@ class RuleConfig:
     torso_angle_duration: int = 8        # 需要持续的帧数
     
     # 速度峰值阈值
-    velocity_peak_threshold: float = 0.02  # 归一化速度
+    velocity_peak_threshold: float = 0.03  # 归一化速度（跟踪器修复后真实运动速度恢复：
+                                           # 跌倒 0.09-0.16，缓慢坐地 0.055，0.08 可分离）
     
     # 静止检测
     stillness_threshold: float = 0.005     # 人体中心移动阈值
@@ -176,9 +177,9 @@ class RuleRefinement(nn.Module):
                 
                 # ---- 最终报警判定 ----
                 # 1. 概率超过阈值
-                # 2. 至少两条规则通过
+                # 2. 通过的物理规则条数达到配置要求
                 rules_passed = sum([angle_ok, speed_ok, aspect_ok])
-                if refined_prob > cfg.tcn_prob_threshold and rules_passed >= 2:
+                if refined_prob > cfg.tcn_prob_threshold and rules_passed >= cfg.rules_min_pass:
                     alarm[b, t, 0] = 1.0
         
         return refined, alarm

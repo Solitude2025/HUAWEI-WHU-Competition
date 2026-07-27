@@ -404,7 +404,7 @@ def generate_evaluation_report(
 
     # ---- 2. 最佳指标摘要 ----
     best_f1 = ckpt.get("best_f1", 0)
-    final_metrics = ckpt.get("val_metrics", ckpt.get("train_metrics", {}))
+    final_metrics = ckpt.get("val_metrics") or ckpt.get("train_metrics", {})
     if final_metrics:
         plot_metrics_summary(
             final_metrics,

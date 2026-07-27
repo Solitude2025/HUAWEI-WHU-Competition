@@ -53,8 +53,8 @@ class ByteTrackWrapper:
     def __init__(
         self,
         track_thresh: float = 0.5,         # 高分框阈值
-        match_thresh: float = 0.8,          # 首次匹配 IoU 阈值
-        second_match_thresh: float = 0.5,   # 二次匹配 IoU 阈值
+        match_thresh: float = 0.3,          # 首次匹配 IoU 阈值（原 0.8 过严，框抖动即失配 → ID 碎片化）
+        second_match_thresh: float = 0.2,   # 二次匹配 IoU 阈值
         track_buffer: int = 30,             # 丢失后保留帧数
         frame_rate: int = 30,               # 帧率
         max_age: int = 60,                  # 最大跟踪寿命
@@ -111,35 +111,40 @@ class ByteTrackWrapper:
         )
         
         # Step 2: 更新已匹配的跟踪
-        for track_id, det_idx in matched:
-            self._tracks[track_id].update(high_score_dets[det_idx])
+        # 注意：matched 的第一个元素是 active_tracks 列表索引，不是 track_id
+        for trk_idx, det_idx in matched:
+            tid = active_tracks[trk_idx].track_id
+            self._tracks[tid].update(high_score_dets[det_idx])
         
         # Step 3: 低分框与剩余未匹配跟踪匹配
         remaining_dets = [high_score_dets[i] for i in unmatched_dets] + low_score_dets
+        remaining_trks = [active_tracks[i] for i in unmatched_trks]
         matched2 = []  # 初始化，防止 UnboundLocalError
         
-        if len(remaining_dets) > 0:
-            remaining_trks = [active_tracks[i] for i in unmatched_trks]
+        if len(remaining_dets) > 0 and len(remaining_trks) > 0:
             matched2, _, _ = self._match_detections(
                 remaining_dets, remaining_trks, self.second_match_thresh
             )
             
-            # Map back to original indices
-            for track_id_remap, det_idx in matched2:
-                orig_trk_id = unmatched_trks[track_id_remap]
-                self._tracks[orig_trk_id].update(remaining_dets[det_idx])
+            # Map back to original track_id
+            for trk_remap, det_idx in matched2:
+                tid = remaining_trks[trk_remap].track_id
+                self._tracks[tid].update(remaining_dets[det_idx])
         
         # Step 4: 未匹配的高分框 → 新跟踪
-        newly_matched = set(i for i, _ in matched)
-        newly_matched2 = set()
-        for trk_remap, det_idx in matched2:
-            newly_matched2.add(det_idx)
+        # matched 的 det_idx 基于 high_score_dets；matched2 的 det_idx 基于
+        # remaining_dets（前 len(unmatched_dets) 个对应 unmatched_dets 中的高分框）
+        matched_high = set(det_idx for _, det_idx in matched)
+        for _, det_idx in matched2:
+            if det_idx < len(unmatched_dets):
+                matched_high.add(unmatched_dets[det_idx])
         
-        # 即没有在匹配1也没有在匹配2中的高分框 → 创建新跟踪
+        new_ids = []
         for i, det in enumerate(high_score_dets):
-            if i not in newly_matched and i not in newly_matched2:
+            if i not in matched_high:
                 track_id = self._next_id
                 self._next_id += 1
+                new_ids.append(track_id)
                 self._tracks[track_id] = TrackedPerson(
                     track_id=track_id,
                     detection=det,
@@ -147,8 +152,10 @@ class ByteTrackWrapper:
                     history=[det],
                 )
         
-        # Step 5: 标记丢失的跟踪
-        matched_trk_ids = set(i for i, _ in matched)
+        # Step 5: 标记丢失的跟踪（含二次匹配与新建 track，避免误标 lost）
+        matched_trk_ids = set(active_tracks[t].track_id for t, _ in matched)
+        matched_trk_ids |= set(remaining_trks[t].track_id for t, _ in matched2)
+        matched_trk_ids |= set(new_ids)
         for track_id, track in self._tracks.items():
             if track_id not in matched_trk_ids:
                 track.mark_lost()
@@ -172,7 +179,7 @@ class ByteTrackWrapper:
         """获取活跃的跟踪目标"""
         return [
             t for t in self._tracks.values()
-            if t.lost_count < self.track_buffer and t.age > 0
+            if t.lost_count < self.track_buffer
         ]
     
     def _match_detections(

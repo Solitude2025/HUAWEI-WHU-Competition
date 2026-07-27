@@ -1,0 +1,9 @@
+{
+  "video": "longtail_env\\sample_1_rain_fog.mp4",
+  "total_frames": 399,
+  "total_time": 0.05828714370727539,
+  "fps": 6845.42035553883,
+  "avg_latency_ms": 0.1460830669355273,
+  "fall_events": [],
+  "frame_alarms": []
+}

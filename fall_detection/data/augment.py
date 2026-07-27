@@ -322,6 +322,96 @@ class KeypointAugmentation:
         return dropped
     
     @staticmethod
+    def frame_dropout(
+        keypoints: np.ndarray,     # (T, 17, 3)
+        drop_prob: float = 0.1,
+        max_burst: int = 5,
+    ) -> np.ndarray:
+        """
+        整帧检测丢失（模拟 YOLO 在遮挡/微光下整帧检不到人）
+
+        真实长尾场景中，检测器失败往往是连续若干帧整帧丢失，
+        而非单个关键点缺失。此增强以 burst 方式将连续帧的
+        关键点置信度置零，训练 TCN 在检测断断续续时保持稳定。
+
+        Args:
+            keypoints: (T, 17, 3)
+            drop_prob: 触发一次丢失 burst 的概率
+            max_burst: 单次连续丢失的最大帧数
+        """
+        dropped = keypoints.copy()
+        t = 0
+        T_len = keypoints.shape[0]
+        while t < T_len:
+            if np.random.rand() < drop_prob:
+                burst = np.random.randint(1, max_burst + 1)
+                end = min(t + burst, T_len)
+                dropped[t:end, :, 2] = 0.0
+                t = end
+            else:
+                t += 1
+        return dropped
+
+    @staticmethod
+    def truncation_dropout(
+        keypoints: np.ndarray,     # (T, 17, 3)
+        start_ratio_range: Tuple[float, float] = (0.3, 0.8),
+    ) -> np.ndarray:
+        """
+        半入境/截断增强（仅用于负样本）
+
+        模拟人物只有上半身在画面中的情况：从某一帧起，
+        下半身关键点（髋、膝、踝，COCO 索引 11-16）置信度连续置零。
+        让 TCN 学会"残缺的身体 ≠ 跌倒"，解决半入境误判。
+
+        Args:
+            keypoints: (T, 17, 3)
+            start_ratio_range: 截断起始位置（占序列比例）的范围
+        """
+        kp = keypoints.copy()
+        T = kp.shape[0]
+        lo, hi = start_ratio_range
+        start = np.random.randint(int(T * lo), max(int(T * hi), int(T * lo) + 1))
+        kp[start:, 11:17, 2] = 0.0   # 髋/膝/踝置信度置零
+        return kp
+
+    @staticmethod
+    def ir_degrade(
+        keypoints: np.ndarray,     # (T, 17, 3)
+        jitter_std_range: Tuple[float, float] = (0.015, 0.03),
+        conf_scale_range: Tuple[float, float] = (0.5, 0.8),
+        limb_drop_prob: float = 0.3,
+    ) -> np.ndarray:
+        """
+        红外场景关键点退化增强
+
+        实测发现：红外画面下 YOLO 关键点噪声大、置信度整体偏低、
+        肢体成组丢失，导致 TCN 概率被压低。训练时模拟这种
+        结构化退化（非独立噪声），提升 IR 场景鲁棒性。
+
+        1. 强坐标抖动（std 0.015-0.03，普通 jitter 的 2-3 倍）
+        2. 置信度整体衰减（×0.5-0.8）
+        3. 按肢体组（左臂/右臂/左腿/右腿）整组丢失
+        """
+        kp = keypoints.copy()
+        
+        # 强抖动
+        std = np.random.uniform(*jitter_std_range)
+        kp[..., :2] += np.random.randn(*kp.shape[:2], 2) * std
+        kp[..., :2] = np.clip(kp[..., :2], 0, 1)
+        
+        # 置信度衰减
+        kp[..., 2] *= np.random.uniform(*conf_scale_range)
+        
+        # 肢体成组丢失（COCO: 5-10 手臂, 11-16 腿）
+        limbs = [[5, 7, 9], [6, 8, 10], [11, 13, 15], [12, 14, 16]]
+        for limb in limbs:
+            if np.random.rand() < limb_drop_prob:
+                kp[:, limb, 2] = 0.0
+        
+        return kp
+
+    @staticmethod
     def keypoint_mixup(
         kp1: np.ndarray,      # (T, 17, 3)
         kp2: np.ndarray,      # (T, 17, 3)
@@ -353,6 +443,9 @@ class AugmentationPipeline:
         lowlight_prob: float = 0.3,      # 低光增强概率
         jitter_std: float = 0.01,        # 关键点抖动
         drop_prob: float = 0.1,          # 关键点丢弃概率
+        frame_drop_prob: float = 0.1,    # 整帧检测丢失概率（burst）
+        truncation_prob: float = 0.2,    # 半入境截断概率（仅负样本）
+        ir_degrade_prob: float = 0.25,   # 红外风格关键点退化概率
     ):
         self.ir_prob = ir_prob
         self.erase_prob = erase_prob
@@ -361,6 +454,9 @@ class AugmentationPipeline:
         self.lowlight_prob = lowlight_prob
         self.jitter_std = jitter_std
         self.drop_prob = drop_prob
+        self.frame_drop_prob = frame_drop_prob
+        self.truncation_prob = truncation_prob
+        self.ir_degrade_prob = ir_degrade_prob
     
     def augment_image(
         self,
@@ -402,6 +498,7 @@ class AugmentationPipeline:
         self,
         keypoints: np.ndarray,      # (T, 17, 3)
         is_training: bool = True,
+        allow_truncation: bool = False,
     ) -> np.ndarray:
         """关键点级别增强"""
         if not is_training:
@@ -416,7 +513,21 @@ class AugmentationPipeline:
         # 关键点丢弃
         if self.drop_prob > 0:
             kp = KeypointAugmentation.keypoint_dropout(kp, self.drop_prob)
-        
+
+        # 整帧检测丢失（模拟遮挡/微光下 YOLO 整帧漏检）
+        if self.frame_drop_prob > 0:
+            kp = KeypointAugmentation.frame_dropout(kp, self.frame_drop_prob)
+
+        # 红外风格关键点退化（强抖动+置信度衰减+肢体成组丢失）
+        if self.ir_degrade_prob > 0:
+            if random.random() < self.ir_degrade_prob:
+                kp = KeypointAugmentation.ir_degrade(kp)
+
+        # 半入境截断（仅负样本：教模型"残缺身体 ≠ 跌倒"）
+        if allow_truncation and self.truncation_prob > 0:
+            if random.random() < self.truncation_prob:
+                kp = KeypointAugmentation.truncation_dropout(kp)
+
         return kp
     
     def augment(

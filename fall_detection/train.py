@@ -74,7 +74,8 @@ class CombinedLoss(nn.Module):
         self.bce_weight = bce_weight
         self.focal_weight = focal_weight
         self.bce = nn.BCELoss()
-        self.focal = FocalLoss()
+        # alpha>0.5 提高正类（跌倒帧）权重，优先保 recall（漏报代价远高于误报）
+        self.focal = FocalLoss(alpha=0.75)
     
     def forward(self, pred: torch.Tensor, target: torch.Tensor) -> torch.Tensor:
         return (
@@ -354,8 +355,11 @@ def main():
                 history_entry[f"val_{k}"] = val_metrics[k]
         history.append(history_entry)
         
-        # 保存检查点
-        val_f1 = val_metrics.get("f1_score", 0.0)
+        # 保存检查点（无验证集时回退到训练集 F1）
+        if val_metrics:
+            val_f1 = val_metrics.get("f1_score", 0.0)
+        else:
+            val_f1 = train_metrics.get("f1_score", 0.0)
         is_best = val_f1 > best_f1
         if is_best:
             best_f1 = val_f1
@@ -382,6 +386,14 @@ def main():
     print(f"训练完成! 最佳 F1: {best_f1:.4f}")
     print(f"模型保存到: {save_dir}")
     print(f"{'='*60}")
+
+    # 保底：若整个训练过程 F1 未超过 0（从未保存 best.pth），用 latest 兜底
+    best_path = os.path.join(save_dir, "best.pth")
+    latest_path = os.path.join(save_dir, "latest.pth")
+    if not os.path.exists(best_path) and os.path.exists(latest_path):
+        import shutil
+        shutil.copy(latest_path, best_path)
+        print("[Train] 未产生最佳模型，已将 latest.pth 复制为 best.pth")
     
     # ── 最终测试集评估 ──
     test_dir = "data/test"

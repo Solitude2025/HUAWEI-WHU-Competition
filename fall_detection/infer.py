@@ -91,7 +91,7 @@ def main():
                        help="模型检查点路径")
     parser.add_argument("--config", type=str, default="configs/config.yaml",
                        help="配置文件路径")
-    parser.add_argument("--version", type=str, default="large",
+    parser.add_argument("--version", type=str, default="standard",
                        choices=["standard", "light", "large",
                                 "transformer-tcn-standard", "transformer-tcn-efficient", "transformer-tcn-light"],
                        help="模型版本")
@@ -107,6 +107,8 @@ def main():
     # ── 其他 ──
     parser.add_argument("--ir", action="store_true",
                        help="红外模式")
+    parser.add_argument("--no_lowlight", action="store_true",
+                       help="关闭自动低光增强（默认开启，仅暗帧触发）")
     parser.add_argument("--no_display", action="store_true",
                        help="不显示实时画面")
 
@@ -195,6 +197,7 @@ def main():
         sequence_length=config.get("pipeline", {}).get("sequence_length", 32),
         detection_interval=config.get("pipeline", {}).get("detection_interval", 2),
         ir_mode=args.ir,
+        auto_lowlight=not args.no_lowlight,
         save_video=True,              # 始终保存视频
         output_dir=args.output,
         rule_config=rule_config,
